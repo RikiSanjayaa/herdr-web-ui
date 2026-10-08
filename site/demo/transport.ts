@@ -318,6 +318,7 @@ function usageReport(): UsageReport {
   ] };
 }
 
+/** Answers demo API requests from fictional panes, workspaces and conversations. */
 async function route(url: URL, method: string, init: RequestInit | undefined, input: RequestInfo | URL): Promise<Response> {
   const path = url.pathname;
   const query = url.searchParams;
