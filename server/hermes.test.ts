@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,11 +10,13 @@ import {
   hermesBreadcrumbSession,
   hermesConversationPage,
   hermesDbPath,
+  hermesToolOutput,
   isHermesProcess,
   parseHermesRows,
   type HermesMessageRow,
 } from "./hermes.ts";
 import { ConversationNotStarted, HistoryChanged } from "./conversation.ts";
+import { toolSummary } from "./transcript-records.ts";
 
 describe("hermes paths", () => {
   it("computes default hermes home and db path", () => {
@@ -61,6 +63,11 @@ describe("hermes terminal breadcrumb resolution", () => {
 });
 
 describe("hermes message rows parsing", () => {
+  it("uses a file summary when a tool's code is blank", () => {
+    expect(toolSummary("write_file", { code: " \n ", file_path: "example.ts" })).toBe("example.ts");
+    expect(toolSummary("execute_code", { code: "\nprint('hello')\nprint('world')" })).toBe("print('hello')");
+  });
+
   it("maps user, assistant, thinking, tool calls and tool outputs to conversation turns", () => {
     const rows: HermesMessageRow[] = [
       {
@@ -226,10 +233,10 @@ describe("hermesConversationPage SQLite integration", () => {
 
     const result = hermesConversationPage("s1", dbPath);
     expect(result.source).toBe("hermes-transcript");
-    expect(result.history_id).toBe("hermes:s1");
+    expect(result.history_id).toStartWith("hermes:s1:");
     expect(result.metadata.model).toBe("claude-3-7-sonnet");
     expect(result.metadata.reasoning_effort).toBe("high");
-    expect(result.metadata.context).toEqual({ used: 1800, window: null });
+    expect(result.metadata.context).toBeUndefined();
     expect(result.turns.length).toBe(2);
     expect(result.turns[0]!.role).toBe("user");
     expect(result.turns[1]!.role).toBe("assistant");
@@ -250,7 +257,7 @@ describe("hermesConversationPage SQLite integration", () => {
 
     const newestPage = hermesConversationPage("s_page", dbPath);
     expect(newestPage.turns.length).toBe(100);
-    expect(newestPage.cursor).toBe("hermes:s_page:51");
+    expect(newestPage.cursor).toBe(`${newestPage.history_id}:51`);
 
     const olderPage = hermesConversationPage("s_page", dbPath, { before: newestPage.cursor! });
     expect(olderPage.turns.length).toBe(50);
@@ -264,5 +271,129 @@ describe("hermesConversationPage SQLite integration", () => {
     db.close();
 
     expect(() => hermesConversationPage("s_curs", dbPath, { before: "other:session:10" })).toThrow(HistoryChanged);
+  });
+
+  /** Creates alternating turns so a 100-row page starts on a user message. */
+  const populate = (count = 150): void => {
+    const db = new Database(dbPath);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('s', 'old-model', 1700000000)").run();
+      const insert = db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s', ?, ?, ?)");
+      for (let id = 1; id <= count; id++) insert.run(id % 2 ? "user" : "assistant", `Message ${id}`, 1700000000 + id);
+    } finally { db.close(); }
+  };
+
+  it("keeps the held page unchanged when polling after loading older history", () => {
+    populate();
+    const newest = hermesConversationPage("s", dbPath);
+    hermesConversationPage("s", dbPath, { before: newest.cursor! });
+    const polled = hermesConversationPage("s", dbPath, { from: newest.cursor! });
+    expect(polled.turns).toEqual(newest.turns);
+    expect(polled.cursor).toBe(newest.cursor);
+    expect(hermesConversationPage("s", dbPath, { from: newest.cursor! }).version).toBe(polled.version);
+  });
+
+  it("returns the newest page after appends and fills the gap back to the held start", () => {
+    populate();
+    const initial = hermesConversationPage("s", dbPath);
+    const db = new Database(dbPath);
+    try {
+      const insert = db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s', ?, ?, ?)");
+      for (let id = 151; id <= 350; id++) insert.run(id % 2 ? "user" : "assistant", `Message ${id}`, 1700000000 + id);
+    } finally { db.close(); }
+    const newest = hermesConversationPage("s", dbPath, { from: initial.cursor! });
+    expect(newest.turns[0]!.parts).toEqual([{ kind: "text", text: "Message 251" }]);
+    expect(newest.turns.at(-1)!.parts).toEqual([{ kind: "text", text: "Message 350" }]);
+    const between = hermesConversationPage("s", dbPath, { before: newest.cursor!, since: initial.cursor! });
+    const first = hermesConversationPage("s", dbPath, { before: between.cursor!, since: initial.cursor! });
+    expect(first.cursor).toBe(initial.cursor);
+    expect([...first.turns, ...between.turns, ...newest.turns].flatMap(turn => turn.parts).map(part => part.kind === "text" ? part.text : ""))
+      .toEqual(Array.from({ length: 300 }, (_, index) => `Message ${index + 51}`));
+  });
+
+  it("refuses foreign, missing and reversed cursor positions", () => {
+    populate();
+    const newest = hermesConversationPage("s", dbPath);
+    const prefix = `${newest.history_id}:`;
+    for (const page of [
+      { before: newest.cursor!, since: "hermes:another-session:1" },
+      { from: `${prefix}-1` },
+      { from: `${prefix}9999` },
+      { before: newest.cursor!, since: `${prefix}101` },
+      { before: newest.cursor!, since: `${prefix}not-a-number` },
+    ]) expect(() => hermesConversationPage("s", dbPath, page)).toThrow(HistoryChanged);
+  });
+
+  it("keeps a tool call and its result together at a page boundary", () => {
+    populate();
+    const db = new Database(dbPath);
+    try {
+      db.query("UPDATE messages SET content = NULL, tool_calls = ? WHERE id = 50").run(JSON.stringify([
+        { id: "boundary-call", function: { name: "bash", arguments: '{"command":"echo example"}' } },
+      ]));
+      db.query("UPDATE messages SET role = 'tool', content = 'example', tool_call_id = 'boundary-call', tool_name = 'bash' WHERE id = 51").run();
+    } finally { db.close(); }
+    const newest = hermesConversationPage("s", dbPath);
+    const older = hermesConversationPage("s", dbPath, { before: newest.cursor! });
+    const tools = [...older.turns, ...newest.turns].flatMap(turn => turn.parts).filter(part => part.kind === "tool");
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({ name: "bash", summary: "echo example", output: "example" });
+  });
+
+  it("refreshes metadata and edited messages while a WAL writer stays open", () => {
+    populate(2);
+    const db = new Database(dbPath);
+    try {
+      db.exec("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
+      const before = hermesConversationPage("s", dbPath);
+      const stat = statSync(dbPath);
+      db.query("UPDATE sessions SET model = 'new-model' WHERE id = 's'").run();
+      const metadata = hermesConversationPage("s", dbPath);
+      expect(statSync(dbPath).mtimeMs).toBe(stat.mtimeMs);
+      expect(statSync(dbPath).size).toBe(stat.size);
+      expect(metadata.metadata.model).toBe("new-model");
+      expect(metadata.version).not.toBe(before.version);
+      db.query("UPDATE messages SET content = 'Edited response' WHERE id = 2").run();
+      const edited = hermesConversationPage("s", dbPath);
+      expect(edited.turns[1]!.parts).toEqual([{ kind: "text", text: "Edited response" }]);
+      expect(edited.version).not.toBe(metadata.version);
+      expect(edited.history_id).toBe(before.history_id);
+    } finally { db.close(); }
+  });
+
+  it("reads nested reasoning settings and omits cumulative session usage", () => {
+    populate(2);
+    const db = new Database(dbPath);
+    try {
+      db.query("UPDATE sessions SET model_config = ?, input_tokens = 1000000, output_tokens = 100000 WHERE id = 's'")
+        .run(JSON.stringify({ reasoning_config: { enabled: true, effort: "high" } }));
+      expect(hermesConversationPage("s", dbPath).metadata).toEqual({ model: "old-model", reasoning_effort: "high" });
+      db.query("UPDATE sessions SET model_config = ? WHERE id = 's'").run(JSON.stringify({ reasoning_config: { enabled: false } }));
+      expect(hermesConversationPage("s", dbPath).metadata.reasoning_effort).toBe("off");
+    } finally { db.close(); }
+  });
+
+  it("loads a whole tool result only from the selected session", () => {
+    populate(2);
+    const db = new Database(dbPath);
+    const output = "tool result ".repeat(500);
+    try {
+      db.query("INSERT INTO messages (session_id, role, content, tool_call_id, timestamp) VALUES (?, 'tool', ?, 'shared-call', 1700000003)").run("s", output);
+      db.query("INSERT INTO messages (session_id, role, content, tool_call_id, timestamp) VALUES (?, 'tool', ?, 'shared-call', 1700000004)").run("another-session", "Another pane's output");
+    } finally { db.close(); }
+    expect(hermesToolOutput("s", dbPath, "shared-call", 2_000_000)).toBe(output);
+    expect(hermesToolOutput("s", dbPath, "missing-call", 2_000_000)).toBeNull();
+    expect(hermesToolOutput("s", dbPath, "shared-call", 20)).toBe(output.slice(0, 20));
+  });
+
+  it("changes history identity and refuses held cursors after database replacement", () => {
+    populate();
+    const before = hermesConversationPage("s", dbPath);
+    const replacement = join(tempDir, "replacement.db");
+    copyFileSync(dbPath, replacement);
+    renameSync(replacement, dbPath);
+    const after = hermesConversationPage("s", dbPath);
+    expect(after.history_id).not.toBe(before.history_id);
+    expect(() => hermesConversationPage("s", dbPath, { from: before.cursor! })).toThrow(HistoryChanged);
   });
 });

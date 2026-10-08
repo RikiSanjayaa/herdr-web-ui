@@ -158,7 +158,8 @@ export function toolSummary(name: string, input: Record<string, unknown>): strin
     if (titles.length > 0) return titles.join(" · ").slice(0, 120);
   }
   // pi names a file `path` where Claude names it `file_path`, and a notebook `notebook_path`.
-  const first = input["command"] ?? (typeof input["code"] === "string" ? input["code"].trim().split("\n")[0] : undefined) ?? input["file_path"] ?? input["notebook_path"] ?? input["path"] ?? input["pattern"] ?? input["description"] ?? input["url"];
+  const code = typeof input["code"] === "string" ? input["code"].trim().split("\n")[0] || undefined : undefined;
+  const first = input["command"] ?? code ?? input["file_path"] ?? input["notebook_path"] ?? input["path"] ?? input["pattern"] ?? input["description"] ?? input["url"];
   return typeof first === "string" ? first.slice(0, 120) : name;
 }
 

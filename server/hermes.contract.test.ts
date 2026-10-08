@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { createServer } from "./index.ts";
 import { herdrRpc, workspaceClose, workspaceCreate } from "./herdr/client.ts";
 import type { ConversationResponse } from "../shared/protocol.ts";
+import { forgetTranscriptState } from "./conversation.ts";
 
 interface RunningServer {
   port: number;
@@ -72,14 +73,17 @@ beforeAll(async () => {
 
 afterAll(async () => {
   server?.stop();
+  forgetTranscriptState();
   if (originalHermesHome === undefined) delete process.env["HERMES_HOME"];
   else process.env["HERMES_HOME"] = originalHermesHome;
   if (workspaceId) await workspaceClose(workspaceId);
   rmSync(root, { recursive: true, force: true });
 });
 
-const read = async (): Promise<ConversationResponse> => {
-  const response = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation?pane_id=${encodeURIComponent(paneId)}`);
+/** Reads the owned pane through the authenticated conversation route. */
+const read = async (page: { before?: string; since?: string; from?: string } = {}): Promise<ConversationResponse> => {
+  const query = new URLSearchParams({ pane_id: paneId, ...page });
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation?${query}`);
   expect(response.status).toBe(200);
   return await response.json() as ConversationResponse;
 };
@@ -100,8 +104,65 @@ it("answers empty conversation before messages are written, then follows the sql
 
   const written = await read();
   expect(written.source).toBe("hermes-transcript");
-  expect(written.history_id).toBe(`hermes:${sessionId}`);
+  expect(written.history_id).toStartWith(`hermes:${sessionId}:`);
   expect(written.turns.length).toBe(2);
   expect(written.turns[0]!.role).toBe("user");
   expect(written.turns[1]!.role).toBe("assistant");
+});
+
+it("keeps a held page inclusive and rejects a cursor from another history over HTTP", async () => {
+  const db = new Database(dbPath);
+  try {
+    db.query("DELETE FROM messages WHERE session_id = ?").run(sessionId);
+    const insert = db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)");
+    for (let index = 1; index <= 150; index++) insert.run(sessionId, index % 2 ? "user" : "assistant", `Message ${index}`, 1700000000 + index);
+  } finally { db.close(); }
+  const newest = await read();
+  expect(newest.turns).toHaveLength(100);
+  const older = await read({ before: newest.cursor! });
+  expect(older.turns).toHaveLength(50);
+  const polled = await read({ from: newest.cursor! });
+  expect(polled.cursor).toBe(newest.cursor);
+  expect(polled.turns).toEqual(newest.turns);
+  const query = new URLSearchParams({ pane_id: paneId, before: newest.cursor!, since: "hermes:another-session:1" });
+  const invalid = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation?${query}`);
+  expect(invalid.status).toBe(409);
+  expect(await invalid.json()).toMatchObject({ error: { code: "history_changed" } });
+});
+
+it("changes the ETag when metadata changes in WAL without appending a message", async () => {
+  const db = new Database(dbPath);
+  try {
+    db.exec("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
+    const url = `http://127.0.0.1:${server.port}/api/pane/conversation?pane_id=${encodeURIComponent(paneId)}`;
+    const before = await fetch(url);
+    expect(before.status).toBe(200);
+    const etag = before.headers.get("etag");
+    expect(etag).not.toBeNull();
+    db.query("UPDATE sessions SET model = ?, model_config = ? WHERE id = ?")
+      .run("new-model", JSON.stringify({ reasoning_config: { enabled: true, effort: "high" } }), sessionId);
+    const after = await fetch(url, { headers: { "if-none-match": etag! } });
+    expect(after.status).toBe(200);
+    expect(after.headers.get("etag")).not.toBe(etag);
+    expect((await after.json() as ConversationResponse).metadata).toEqual({ model: "new-model", reasoning_effort: "high" });
+  } finally { db.close(); }
+});
+
+it("loads the whole output of a tool result cut in the conversation page", async () => {
+  const output = "A fictional tool result.\n".repeat(300);
+  const db = new Database(dbPath);
+  try {
+    db.query("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES (?, 'assistant', ?, 1700000500)").run(sessionId,
+      JSON.stringify([{ id: "large-tool", function: { name: "execute_code", arguments: '{"code":"print(result)"}' } }]),
+    );
+    db.query("INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp) VALUES (?, 'tool', ?, 'large-tool', 'execute_code', 1700000501)")
+      .run(sessionId, output);
+  } finally { db.close(); }
+  const conversation = await read();
+  const tool = conversation.turns.flatMap(turn => turn.parts).find(part => part.kind === "tool" && part.output_ref === "large-tool");
+  expect(tool).toMatchObject({ output_ref: "large-tool", output_size: output.length });
+  const query = new URLSearchParams({ pane_id: paneId, ref: "large-tool" });
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation/tool-output?${query}`);
+  expect(response.status).toBe(200);
+  expect(await response.text()).toBe(output);
 });

@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readlinkSync, statSync, type Stats } from "node:fs";
 import { join } from "node:path";
 
 import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPane } from "../shared/protocol.ts";
@@ -20,14 +21,17 @@ export interface HermesMessageRow {
   timestamp: number;
 }
 
+/** Uses HERMES_HOME when set, otherwise the user's .hermes directory. */
 export function defaultHermesHome(userHome?: string): string {
   return process.env["HERMES_HOME"] || join(userHome ?? process.env["HOME"] ?? "", ".hermes");
 }
 
+/** Locates the session database within the selected Hermes home. */
 export function hermesDbPath(hermesHome = defaultHermesHome()): string {
   return join(hermesHome, "state.db");
 }
 
+/** Recognizes the Hermes executable, including Python launching its entrypoint. */
 export function isHermesProcess(entry: { name?: string; argv0?: string; argv?: readonly string[] }): boolean {
   const binary = (entry.name ?? entry.argv0 ?? entry.argv?.[0] ?? "").toLowerCase();
   if (binary === "hermes" || binary === "hermes.exe" || binary.endsWith("/hermes") || binary.endsWith("\\hermes.exe")) return true;
@@ -64,6 +68,7 @@ export function hermesTerminalId(pid: number): string | null {
   return null;
 }
 
+/** Reads a terminal's reported session, refusing a breadcrumb from another cwd. */
 export function hermesBreadcrumbSession(home: string, terminalId: string, cwd: string): string | null {
   try {
     const marker = join(home, "terminal-sessions", terminalId);
@@ -123,11 +128,9 @@ export async function hermesTranscriptForPane(
 const hermesCache = new Map<string, {
   signature: string;
   turns: ConversationTurn[];
-  metadata: ConversationMetadata;
-  cursor: string | null;
-  version: string;
 }>();
 
+/** Drops parsed pages for a closed pane's database, or every page during test cleanup. */
 export function forgetHermesTranscriptState(path?: string): void {
   if (path === undefined) {
     hermesCache.clear();
@@ -140,12 +143,69 @@ export function forgetHermesTranscriptState(path?: string): void {
 
 const PAGE_SIZE = 100;
 
+/** Reads a bounded tool result by call ID from the selected session only. */
+export function hermesToolOutput(sessionId: string, dbPath: string, ref: string, maxChars: number): string | null {
+  let db: Database;
+  try { db = new Database(dbPath, { readonly: true, create: false }); }
+  catch { return null; }
+  try {
+    const row = db.query<{ content: string | null }, [number, string, string]>(
+      `SELECT substr(content, 1, ?) AS content FROM messages
+       WHERE session_id = ? AND role = 'tool' AND tool_call_id = ? AND (active = 1 OR compacted = 1)
+       ORDER BY id DESC LIMIT 1`,
+    ).get(maxChars, sessionId, ref);
+    return row?.content?.slice(0, maxChars) ?? null;
+  } finally { db.close(); }
+}
+
+/** Widens a bounded row window to the user message that starts its exchange. */
+function hermesPageStart(db: Database, sessionId: string, before: number, floor: number): number {
+  const window = db.query<{ id: number }, [string, number, number]>(
+    `SELECT id FROM messages
+     WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id < ? AND id >= ?
+     ORDER BY id DESC LIMIT ${PAGE_SIZE}`,
+  ).all(sessionId, before, floor);
+  const first = window.at(-1);
+  if (!first) return before;
+  const user = db.query<{ id: number | null }, [string, number, number]>(
+    `SELECT MAX(id) AS id FROM messages
+     WHERE session_id = ? AND (active = 1 OR compacted = 1) AND role = 'user' AND id <= ? AND id >= ?`,
+  ).get(sessionId, first.id, floor);
+  return user?.id ?? floor;
+}
+
+/** Reads recorded reasoning settings without treating cumulative token usage as context. */
+function hermesMetadata(session: { model?: string | null; model_config?: string | null } | null): ConversationMetadata {
+  let reasoningEffort: string | null = null;
+  if (session?.model_config) {
+    try {
+      const parsed = JSON.parse(session.model_config) as {
+        reasoning_config?: { enabled?: unknown; effort?: unknown } | string;
+        reasoning_effort?: unknown;
+      };
+      const config = parsed.reasoning_config;
+      if (typeof config === "object" && config !== null) {
+        if (config.enabled === false) reasoningEffort = "off";
+        else if (typeof config.effort === "string") reasoningEffort = config.effort;
+      } else if (typeof config === "string") reasoningEffort = config;
+      else if (typeof parsed.reasoning_effort === "string") reasoningEffort = parsed.reasoning_effort;
+    } catch { /* invalid model configuration */ }
+  }
+  return { model: session?.model ?? null, reasoning_effort: reasoningEffort };
+}
+
+/**
+ * Reads a consistent SQLite snapshot with whole exchanges at page boundaries.
+ * Held pages include their starting row; a held start outside the newest window
+ * advances to that window, with before/since pages covering the gap.
+ * Page contents name the cache version so WAL edits invalidate unchanged row counts.
+ */
 export function hermesConversationPage(
   sessionId: string,
   dbPath: string,
   page: ConversationPage = {},
 ): RecognizedConversation {
-  let stat: { size: number; mtimeMs: number };
+  let stat: Stats;
   try {
     stat = statSync(dbPath);
   } catch {
@@ -160,121 +220,91 @@ export function hermesConversationPage(
   }
 
   try {
-    const sessionRow = db.query<{
-      id: string;
-      model?: string | null;
-      model_config?: string | null;
-      started_at: number;
-      input_tokens?: number | null;
-      output_tokens?: number | null;
-      reasoning_tokens?: number | null;
-    }, [string]>(
-      "SELECT id, model, model_config, started_at, input_tokens, output_tokens, reasoning_tokens FROM sessions WHERE id = ?",
-    ).get(sessionId);
+    return db.transaction((): RecognizedConversation => {
+      const sessionRow = db.query<{
+        id: string;
+        model?: string | null;
+        model_config?: string | null;
+        started_at: number;
+      }, [string]>(
+        "SELECT id, model, model_config, started_at FROM sessions WHERE id = ?",
+      ).get(sessionId);
 
-    const statsRow = db.query<{ max_id: number | null; count: number }, [string]>(
-      "SELECT MAX(id) AS max_id, COUNT(*) AS count FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1)",
-    ).get(sessionId);
+      const firstRow = db.query<{ id: number }, [string]>(
+        "SELECT id FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) ORDER BY id ASC LIMIT 1",
+      ).get(sessionId);
 
-    if (!statsRow || statsRow.count === 0) {
-      throw new ConversationNotStarted(sessionId, "hermes-transcript");
-    }
+      if (!firstRow) {
+        throw new ConversationNotStarted(sessionId, "hermes-transcript");
+      }
 
-    const historyId = `hermes:${sessionId}`;
-    const cacheKey = page.before !== undefined
-      ? `${dbPath}\0${sessionId}\0before:${page.before}:${page.since ?? ""}`
-      : `${dbPath}\0${sessionId}\0from:${page.from ?? ""}`;
-    const signature = `${sessionId}:${statsRow.max_id ?? 0}:${statsRow.count}:${stat.size}:${stat.mtimeMs}`;
-    const version = answerVersion(cacheKey, signature);
+      const identity = createHash("sha256").update(`${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${sessionRow?.started_at ?? ""}`).digest("base64url").slice(0, 16);
+      const historyId = `hermes:${sessionId}:${identity}`;
+      const cacheKey = page.before !== undefined
+        ? `${dbPath}\0${historyId}\0before:${page.before}:${page.since ?? ""}`
+        : `${dbPath}\0${historyId}\0from:${page.from ?? ""}`;
+      const prefix = `${historyId}:`;
 
-    const cached = hermesCache.get(cacheKey);
-    if (cached && cached.signature === signature) {
+      /** Accepts only an exchange boundary still present in this database generation. */
+      const parseCursor = (cursor: string): number => {
+        if (!cursor.startsWith(prefix)) throw new HistoryChanged();
+        const value = cursor.slice(prefix.length);
+        const id = Number(value);
+        if (!/^\d+$/.test(value) || !Number.isSafeInteger(id) || id < firstRow.id) throw new HistoryChanged();
+        const row = db.query<{ role: string }, [string, number]>(
+          "SELECT role FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id = ?",
+        ).get(sessionId, id);
+        if (!row || (id !== firstRow.id && row.role !== "user")) throw new HistoryChanged();
+        return id;
+      };
+
+      let start: number;
+      let before: number;
+      if (page.before !== undefined) {
+        before = parseCursor(page.before);
+        const floor = page.since === undefined ? firstRow.id : parseCursor(page.since);
+        if (floor > before) throw new HistoryChanged();
+        start = hermesPageStart(db, sessionId, before, floor);
+      } else {
+        if (page.since !== undefined) throw new HistoryChanged();
+        before = Number.MAX_SAFE_INTEGER;
+        const newest = hermesPageStart(db, sessionId, before, firstRow.id);
+        const held = page.from === undefined ? null : parseCursor(page.from);
+        start = held === null ? newest : Math.max(held, newest);
+      }
+
+      const rows = db.query<HermesMessageRow, [string, number, number]>(
+        `SELECT id, role, content, tool_call_id, tool_calls, tool_name, reasoning, timestamp
+         FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
+         ORDER BY id ASC`,
+      ).all(sessionId, start, before);
+      const cursor = start > firstRow.id ? `${prefix}${start}` : null;
+      const metadata = hermesMetadata(sessionRow);
+      const signature = createHash("sha256").update(JSON.stringify([rows, metadata, cursor])).digest("base64url");
+      const version = answerVersion(cacheKey, signature);
+      const cached = hermesCache.get(cacheKey);
+      if (cached?.signature === signature) {
+        return { source: "hermes-transcript", turns: cached.turns, metadata, cursor, history_id: historyId, version };
+      }
+      const turns = parseHermesRows(rows);
+      hermesCache.set(cacheKey, { signature, turns });
+      if (hermesCache.size > 64) hermesCache.delete(hermesCache.keys().next().value!);
+
       return {
         source: "hermes-transcript",
-        turns: cached.turns,
-        metadata: cached.metadata,
-        cursor: cached.cursor,
+        turns,
+        metadata,
+        cursor,
         history_id: historyId,
         version,
       };
-    }
-
-    let rows: HermesMessageRow[];
-    const prefix = `${historyId}:`;
-
-    if (page.before !== undefined) {
-      if (!page.before.startsWith(prefix)) throw new HistoryChanged();
-      const beforeId = Number(page.before.slice(prefix.length));
-      if (!Number.isSafeInteger(beforeId)) throw new HistoryChanged();
-      const floorId = page.since !== undefined && page.since.startsWith(prefix) ? Number(page.since.slice(prefix.length)) : 0;
-      rows = db.query<HermesMessageRow, [string, number, number]>(
-        `SELECT id, role, content, tool_call_id, tool_calls, tool_name, reasoning, timestamp
-         FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id < ? AND id >= ?
-         ORDER BY id DESC LIMIT ${PAGE_SIZE}`,
-      ).all(sessionId, beforeId, floorId).reverse();
-    } else if (page.from !== undefined) {
-      if (!page.from.startsWith(prefix)) throw new HistoryChanged();
-      const fromId = Number(page.from.slice(prefix.length));
-      if (!Number.isSafeInteger(fromId)) throw new HistoryChanged();
-      rows = db.query<HermesMessageRow, [string, number]>(
-        `SELECT id, role, content, tool_call_id, tool_calls, tool_name, reasoning, timestamp
-         FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id > ?
-         ORDER BY id ASC LIMIT ${PAGE_SIZE}`,
-      ).all(sessionId, fromId);
-    } else {
-      rows = db.query<HermesMessageRow, [string]>(
-        `SELECT id, role, content, tool_call_id, tool_calls, tool_name, reasoning, timestamp
-         FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1)
-         ORDER BY id DESC LIMIT ${PAGE_SIZE}`,
-      ).all(sessionId).reverse();
-    }
-
-    let cursor: string | null = null;
-    if (rows.length > 0) {
-      const earliestId = rows[0]!.id;
-      const older = db.query<{ id: number }, [string, number]>(
-        "SELECT id FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id < ? LIMIT 1",
-      ).get(sessionId, earliestId);
-      if (older !== null) {
-        cursor = `${historyId}:${earliestId}`;
-      }
-    }
-
-    const turns = parseHermesRows(rows);
-
-    let reasoningEffort: string | null = null;
-    if (sessionRow?.model_config) {
-      try {
-        const parsed = JSON.parse(sessionRow.model_config) as { reasoning_config?: unknown; reasoning_effort?: unknown };
-        if (typeof parsed.reasoning_config === "string") reasoningEffort = parsed.reasoning_config;
-        else if (typeof parsed.reasoning_effort === "string") reasoningEffort = parsed.reasoning_effort;
-      } catch { /* invalid json */ }
-    }
-
-    const metadata: ConversationMetadata = {
-      model: sessionRow?.model ?? null,
-      reasoning_effort: reasoningEffort,
-      context: sessionRow?.input_tokens != null
-        ? { used: (sessionRow.input_tokens ?? 0) + (sessionRow.output_tokens ?? 0), window: null }
-        : undefined,
-    };
-
-    hermesCache.set(cacheKey, { signature, turns, metadata, cursor, version });
-    if (hermesCache.size > 64) hermesCache.delete(hermesCache.keys().next().value!);
-
-    return {
-      source: "hermes-transcript",
-      turns,
-      metadata,
-      cursor,
-      history_id: historyId,
-      version,
-    };
+    })();
   } finally {
     db.close();
   }
 }
 
+/** Groups assistant activity and matched tool results into turns, preserving recorded reasoning. */
 export function parseHermesRows(rows: readonly HermesMessageRow[]): ConversationTurn[] {
   const turns: ConversationTurn[] = [];
   const pendingTools = new Map<string, Extract<ConversationPart, { kind: "tool" }>>();

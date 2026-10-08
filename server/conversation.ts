@@ -51,7 +51,7 @@ import { forgetAllPiIndexes, forgetPiIndex, piAbandonedTurns, piBranchSegments }
 import { defaultDevinDbPath, DevinHistoryUnavailable, devinConversation, forgetDevinState } from "./devin.ts";
 import { trimOutput } from "./tool-output.ts";
 import { parseConversationMetadata } from "./conversation-metadata.ts";
-import { defaultHermesHome, forgetHermesTranscriptState, hermesConversationPage, hermesTranscriptForPane } from "./hermes.ts";
+import { defaultHermesHome, forgetHermesTranscriptState, hermesConversationPage, hermesToolOutput, hermesTranscriptForPane } from "./hermes.ts";
 import { invokedSkill } from "./skill-activity.ts";
 import { isContextClear, MAX_TURNS, parseOmpTranscript, piImageBlock, piMessage, piResults, toolSummary } from "./transcript-records.ts";
 
@@ -437,6 +437,7 @@ type StreamSource = Exclude<RecognizedConversation["source"], "opencode-transcri
 /** A restart may parse the same files differently: its answers never match an earlier ETag. */
 const PROCESS_VERSION = randomUUID();
 
+/** Names a page answer from its cache key and contents, with a fresh namespace after restart. */
 export function answerVersion(key: string, signature: string): string {
   return createHash("sha256").update(`${PROCESS_VERSION}\0${key}\0${signature}`).digest("base64url").slice(0, 22);
 }
@@ -1207,7 +1208,6 @@ export async function paneConversation(paneId: string, codexHome?: string, page:
       }
     }
   }
-
   /** Answers an unwritten idle session while refusing vanished or previously held history. */
   const onNotStarted = (error: ConversationNotStarted): RecognizedConversation => {
     if (writtenSessions.has(`${error.source}\0${error.identity}`)) throw new ConversationUnavailable("transcript_missing");
@@ -1399,6 +1399,7 @@ export async function toolOutput(paneId: string, ref: string, codexHome?: string
     return output !== null && output.length > TOOL_OUTPUT_MAX ? `${output.slice(0, TOOL_OUTPUT_MAX)}\n… trimmed` : output;
   }
   rememberPaneRead(paneId, resolved.path);
+  if (resolved.source === "hermes-transcript") return hermesToolOutput(resolved.sessionId!, resolved.path, ref, TOOL_OUTPUT_MAX);
   return transcriptToolOutput(resolved.source, resolved.path, ref, resolved.codexHome ?? codexHome);
 }
 
