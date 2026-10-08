@@ -7,6 +7,9 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
 
 ## [Unreleased]
 
+### Added
+- Native conversation transcripts for Hermes Agent: turns, thinking blocks, and tool calls are read directly from its SQLite session store.
+
 ### Fixed
 - Open tabs take turns chiming for the same alert. A question or a finish is still heard if
   the tab that claimed it closes or cannot play it, including on plain-HTTP LAN addresses.
@@ -132,7 +135,6 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   is, also when the pane is kept on the terminal. The pane's own view is not changed: pick the
   pane or a view yourself and it is back. A shell's notification opens its terminal as before.
   ([#605](https://github.com/devswha/herdr-web-ui/pull/605) by @Xianbei233)
-
 ## [0.4.1] - 2026-10-08
 
 ### Added
