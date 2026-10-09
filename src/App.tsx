@@ -900,6 +900,7 @@ export function App() {
           <div id={PANE_TABPANEL_ID} className="terminal-tabpanel" role={tabPanelLabel === null ? undefined : "tabpanel"} aria-label={tabPanelLabel ?? undefined}>
           <PaneTerminal
             key={selectedMachineId}
+            title={selectedTitle}
             paneId={selectedPane?.restore_error ? null : selectedPaneId}
             restoreError={selectedPane?.restore_error ?? null}
             agent={selectedAgent}

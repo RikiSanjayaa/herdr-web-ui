@@ -156,6 +156,7 @@ const MAX_WAITING_KEYS = 256;
  * reaches the pane later.
  */
 export const SUBMIT_DEADLINE_MS = 45_000;
+const CLAUDE_INPUT_DRAFT_MESSAGE = "Claude Code's input box is not empty (a draft, bash mode, or a box that could not be read); send or clear it in the terminal, then send this message";
 const SERVER_FEATURES: ServerFeature[] = ["submit", "pending-input", "secret-input", "input-ready", "take-over"];
 
 /** Bind addresses only this machine can reach, so an unset token is nobody else's business. */
@@ -486,14 +487,23 @@ export function createServer(
     inTime();
     // the terminal's input line stands in for the keyboard: it types what the user wrote, an
     // answer into an open menu included, where agent.prompt would refuse
-    if (!fromTerminal) try {
-      await agentPrompt(paneId, closeMention(text));
-      noteSubmitted(paneId, text);
-      return;
-    } catch (error) {
-      if (!(error instanceof HerdrError)) throw error;
-      const queuedOnly = error.code === "agent_blocked" && await blockedOnlyByCodexQueue(paneId);
-      if (error.code !== "agent_not_found" && error.code !== "agent_not_ready" && !queuedOnly) throw error;
+    if (!fromTerminal) {
+      const pane = (await sessionSnapshot()).panes.find((candidate) => candidate.pane_id === paneId);
+      inTime();
+      if ((pane?.agent ?? pane?.agent_session?.agent) === "claude") {
+        const [live, colors] = await claudeBoxReads(paneId);
+        inTime();
+        if (claudeInputDraft(live, colors)) throw new HerdrError("input_draft", CLAUDE_INPUT_DRAFT_MESSAGE);
+      }
+      try {
+        await agentPrompt(paneId, closeMention(text));
+        noteSubmitted(paneId, text);
+        return;
+      } catch (error) {
+        if (!(error instanceof HerdrError)) throw error;
+        const queuedOnly = error.code === "agent_blocked" && await blockedOnlyByCodexQueue(paneId);
+        if (error.code !== "agent_not_found" && error.code !== "agent_not_ready" && !queuedOnly) throw error;
+      }
     }
     inTime();
     // a mirrored pane's browser never learned the program's paste mode, so `payload` came as bare
@@ -638,7 +648,7 @@ export function createServer(
       // The box is the live screen's; only the viewport read tells Claude's grey text from a draft. The live
       // read comes after the colors, so text typed between the two is in the box and holds the message.
       if (context.identity.agent === "claude" && claudeInputDraft(...await claudeBoxReads(paneId))) {
-        throw new HerdrError("input_draft", "Claude Code's input box is not empty (a draft, bash mode, or a box that could not be read); send or clear it in the terminal, then send this message");
+        throw new HerdrError("input_draft", CLAUDE_INPUT_DRAFT_MESSAGE);
       }
       if (Date.now() - arrivedAt > (options.submitDeadlineMs ?? SUBMIT_DEADLINE_MS)) throw new HerdrError("submit_timeout", "The pending message waited too long; nothing was typed");
       authorizePending(owner, paneId, lease);

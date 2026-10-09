@@ -373,8 +373,11 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   height: var(--space-4);
 }
 
+/* a stepped rotation draws its steps and nothing else, so the count is the frame rate: at this
+   arc's 6px radius, 48 steps over --dur-spin move it under a pixel every 33ms, which the eye
+   reads as a turn rather than a tick */
 .sidebar-status[data-status="working"] svg {
-  animation: sidebar-working var(--dur-pulse) steps(8, end) infinite;
+  animation: sidebar-working var(--dur-spin) steps(48, end) infinite;
 }
 
 /* A question mark asks for an answer; a dot, as an unread mark is, has finished and was not

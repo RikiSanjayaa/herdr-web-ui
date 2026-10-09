@@ -509,9 +509,13 @@ export function Composer({
       : []),
     [commands, slashUsage, trigger],
   );
+  // a typed query lists the matches in rank order, whatever their source (a plugin command whose
+  // word starts with it must not sit under a built-in that only has its letters scattered);
+  // the source then rides on each row. Only the bare `/` lists by group.
+  const groupedBySource = trigger?.kind === "slash" && trigger.query === "";
   const orderedCommands = useMemo(
-    () => COMMAND_SOURCES.flatMap((source) => filteredCommands.filter((command) => command.source === source)),
-    [filteredCommands],
+    () => groupedBySource ? COMMAND_SOURCES.flatMap((source) => filteredCommands.filter((command) => command.source === source)) : filteredCommands,
+    [filteredCommands, groupedBySource],
   );
   const choices: readonly (SlashCommand | string)[] = trigger?.kind === "slash" ? orderedCommands : files;
   const menuOpen = !menuDismissed && trigger !== null && choices.length > 0;
@@ -785,6 +789,10 @@ export function Composer({
   const usageAccessible = usage === undefined ? "" : `${t("Subscription usage")}: ${usageName(usage)}, ${usageDetail.replaceAll("\n", ", ")}`;
   const hintText = hint === null ? null : t(hint === "uploading" ? "Uploading file…" : "Reconnecting… message held here, never queued");
   const menuId = `composer-menu-${paneId}`;
+  // the arrow keys move the selection, not the focus (it stays in the box), so the browser does not scroll to it
+  useEffect(() => {
+    if (menuOpen) document.getElementById(`${menuId}-${selectedIndex}`)?.scrollIntoView({ block: "nearest" });
+  }, [menuOpen, menuId, selectedIndex, choices]);
 
   return (
     <div className="composer" role="group" aria-label={t("Message composer")} data-dictating={dictation.voice.state !== "idle" ? "" : undefined}>
@@ -846,33 +854,37 @@ export function Composer({
         {menuOpen && trigger && (
           <div id={menuId} className="menu composer-menu" role="listbox" aria-label={t(trigger.kind === "slash" ? "Slash commands" : "Files")}>
             {trigger.kind === "slash" ? (
-              COMMAND_SOURCES.map((source) => {
-                const group = filteredCommands.filter((command) => command.source === source);
-                if (group.length === 0) return null;
-                return (
-                  <div className="composer-menu-group" key={source}>
-                    <div className="menu-heading">{t(SOURCE_LABEL[source])}</div>
-                    {group.map((command) => {
-                      const index = orderedCommands.indexOf(command);
-                      return (
-                        <button
-                          id={`${menuId}-${index}`}
-                          key={`${command.source}:${command.name}`}
-                          type="button"
-                          className="menu-item"
-                          role="option"
-                          aria-selected={index === selectedIndex}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={() => selectCompletion(command, trigger)}
-                        >
-                          <span className="menu-item-main">{command.trigger ?? "/"}{command.name}</span>
-                          <span className="menu-item-hint">{command.description}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                );
-              })
+              (() => {
+                const row = (command: SlashCommand, withSource: boolean) => {
+                  const index = orderedCommands.indexOf(command);
+                  return (
+                    <button
+                      id={`${menuId}-${index}`}
+                      key={`${command.source}:${command.name}`}
+                      type="button"
+                      className="menu-item"
+                      role="option"
+                      aria-selected={index === selectedIndex}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => selectCompletion(command, trigger)}
+                    >
+                      <span className="menu-item-main">{command.trigger ?? "/"}{command.name}</span>
+                      <span className="menu-item-hint">{withSource ? `${t(SOURCE_LABEL[command.source])}${command.description ? " · " : ""}` : ""}{command.description}</span>
+                    </button>
+                  );
+                };
+                if (!groupedBySource) return <div className="composer-menu-group">{orderedCommands.map((command) => row(command, true))}</div>;
+                return COMMAND_SOURCES.map((source) => {
+                  const group = filteredCommands.filter((command) => command.source === source);
+                  if (group.length === 0) return null;
+                  return (
+                    <div className="composer-menu-group" key={source}>
+                      <div className="menu-heading">{t(SOURCE_LABEL[source])}</div>
+                      {group.map((command) => row(command, false))}
+                    </div>
+                  );
+                });
+              })()
             ) : (
               <div className="composer-menu-group">
                 <div className="menu-heading">{t("Files")}</div>

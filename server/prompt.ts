@@ -1852,8 +1852,9 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // the last row carries the cursor once a move has put it there
   if (prompt.responder === "codex-approval") return ends(/press enter to confirm|esc to cancel|enter continue.*esc back|^(?:[›>❯]\s*)?\d+\.\s+(?:No|Reject|Cancel|Deny)\b/i);
   if (prompt.responder === "omp-approval") return ends(/^(?:[›>❯•]\s*)?(?:Approve|Deny)$|esc.*cancel/i);
-  // Claude Code 2.1.29x ends the panel with "Esc to cancel" alone, the hint's other keys gone
-  if (prompt.responder === "claude-approval") return ends(/esc to cancel.*(?:tab|ctrl\+e)|ctrl\+e to explain|^esc to cancel$/i);
+  // Claude Code 2.1.29x ends with "Esc to cancel", optionally followed by its stop-agents
+  // chord. Anchor that suffix so arbitrary trailing text cannot keep an old approval live.
+  if (prompt.responder === "claude-approval") return ends(/esc to cancel.*(?:tab|ctrl\+e)|ctrl\+e to explain|^esc to cancel(?:\s*·\s*ctrl\+x ctrl\+k twice to stop background agents)?$/i);
   if (prompt.responder === "claude-confirm") return ends(CLAUDE_CONFIRM_HINT_RE);
   // its parser already found the hint over the input box with only the footer under it
   if (prompt.responder === "claude-held") return true;

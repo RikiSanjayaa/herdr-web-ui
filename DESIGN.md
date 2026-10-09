@@ -1062,6 +1062,7 @@ One set for both themes: the card is island black wherever it shows.
 | Micro | `--dur-fast` | `120ms` | Hover, active, toggle and control state |
 | Standard | `--dur-base` | `180ms` | Drawer slide; reserved dialog timing token |
 | Pulse | `--dur-pulse` | `1600ms` | Working and reconnecting dots (trough opacity 0.35; text never pulses) |
+| Spin | `--dur-spin` | `1600ms` | The sidebar's working arc: forty-eight steps over the turn (about 30 frames a second), under a pixel of travel each, where a coarser count reads as a stutter; the step count sets the frame rate, so this endless animation stays stepped |
 | Easing | `--ease-out` | `cubic-bezier(0.2, 0, 0, 1)` | Finite transitions |
 | Pulse easing | `--ease-pulse` | `steps(2, jump-none)` | Endless working and reconnecting dots; avoids drawing every display refresh |
 | Spring easing | `--ease-spring` | `cubic-bezier(0.32, 0.72, 0, 1)` | Voice recording pill enter (180ms, scale 0.96->1 + opacity, from the mic button) and exit (120ms) |

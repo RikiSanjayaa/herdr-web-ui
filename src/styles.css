@@ -150,6 +150,9 @@
   --dur-fast: 120ms;
   --dur-base: 180ms;
   --dur-pulse: 1600ms;
+  /* one turn of the working arc: a stepped rotation draws its steps and nothing else, so the
+     step count in Sidebar.css is the frame rate and this only sets how fast it looks */
+  --dur-spin: 1600ms;
   --ease-out: cubic-bezier(0.2, 0, 0, 1);
   --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
   /* the pulse jumps between its two looks: a smooth one has the browser draw a new frame at

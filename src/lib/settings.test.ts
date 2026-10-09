@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { FONT_FAMILY_MAX_CHARS } from "./fontFamily.ts";
 import { DEFAULT_KEY_BAR_ITEMS, migrateKeyBarItems } from "./keyBar.ts";
-import { alertPrefs, CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_LANE_MAX_REM, CHAT_LANE_MIN, CHAT_WIDTHS, chatFontSize, chatLaneLength, chatLaneWidth, DEFAULT_SETTINGS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, quickReplyButtons, sanitizeSettings, terminalTheme, forgetPaneViews, VOICE_BUTTONS, wantsVoiceInput } from "./settings.ts";
+import { alertPrefs, CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_LANE_MAX_REM, CHAT_LANE_MIN, CHAT_WIDTHS, chatFontSize, chatLaneLength, chatLaneWidth, DEFAULT_SETTINGS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, quickReplyButtons, sanitizeSettings, terminalTheme, forgetPaneViews, DICTATION_LANGUAGES, VOICE_BUTTONS, wantsVoiceInput } from "./settings.ts";
 
 it("keeps the screen wake lock off until this device explicitly enables it", () => {
   expect(DEFAULT_SETTINGS.keepScreenOn).toBe(false);
@@ -311,6 +311,13 @@ describe("microphone button", () => {
     expect(sanitizeSettings({ voiceInput: true }).voiceInput).toBe("on");
     expect(sanitizeSettings({ voiceInput: false }).voiceInput).toBe("auto");
     for (const voiceInput of [null, 1, "yes", "ON"]) expect(sanitizeSettings({ voiceInput }).voiceInput).toBe("auto");
+  });
+
+  it("listens for the browser's language until another is chosen from the list", () => {
+    expect(DEFAULT_SETTINGS.voiceLanguage).toBe("auto");
+    expect(sanitizeSettings({}).voiceLanguage).toBe("auto");
+    for (const voiceLanguage of DICTATION_LANGUAGES) expect(sanitizeSettings({ voiceLanguage }).voiceLanguage).toBe(voiceLanguage);
+    for (const voiceLanguage of [null, 1, "", "hu", "hu-hu", "xx-XX", "auto "]) expect(sanitizeSettings({ voiceLanguage }).voiceLanguage).toBe("auto");
   });
 
   it("is asked for in the chat off a phone on auto, everywhere when on and nowhere when off", () => {

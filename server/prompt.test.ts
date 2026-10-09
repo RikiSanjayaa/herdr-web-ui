@@ -8,6 +8,30 @@ import type { InteractivePrompt } from "../shared/protocol.ts";
 import { answerKeys, claudeInputDraft, viewportShowsLive, removedInvisible, noteSubmitted, codexQuestionsCollapsed, codexQueuedPrompt, handlePromptRequest, modelListWaits, openOmoAsks, parseClaudeSuggestion, parseFallbackPrompt, parseInteractivePrompt, pendingOmoAsk, promptWaitEnded } from "./prompt.ts";
 
 const labels = (prompt: InteractivePrompt | null) => prompt?.options.map((option) => option.label);
+const CLAUDE_BACKGROUND_APPROVAL_FOOTER = "Esc to cancel · ctrl+x ctrl+k twice to stop background agents";
+const claudeBackgroundApproval = (selected: number, footer = CLAUDE_BACKGROUND_APPROVAL_FOOTER) => {
+  const row = (index: number, label: string) => `${index === selected ? " ❯ " : "   "}${index + 1}. ${label}`;
+  return [
+    "✻ Waiting for 1 background agent to finish",
+    "",
+    "─".repeat(80),
+    " Bash command · from the general-purpose agent",
+    " Run shell command",
+    "╌".repeat(80),
+    " │ systemctl --user start demo.service",
+    "╌".repeat(80),
+    " │ Permission rule Bash(systemctl --user start:*) requires confirmation for this command.",
+    " /permissions to update rules",
+    "",
+    " Do you want to proceed?",
+    row(0, "Yes"),
+    row(1, "Yes, and don't ask again for: systemctl --user start demo.service"),
+    row(2, "No"),
+    "",
+    ` ${footer}`,
+    "",
+  ].join("\n");
+};
 
 describe("interactive prompt parsing", () => {
   test("invalidates approvals when their command changes, including text beyond the display cap", () => {
@@ -3561,6 +3585,18 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
     }
   });
 
+  test("answers Claude's second option after redrawing its background-agent footer", async () => {
+    await withPane("claude", "blocked", claudeBackgroundApproval(0), async (pane) => {
+      const prompt = (await card())!;
+      pane.onSent = (sent) => {
+        if (sent === "down") pane.screen = claudeBackgroundApproval(1);
+      };
+      expect(await answer(prompt.id, { option_index: 1 })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["down", "enter"]);
+      expect(pane.sent.some((sent) => sent.startsWith("text:") || /^\d+$/.test(sent))).toBe(false);
+    });
+  });
+
   test("picks Claude's model with s only where the list still shows that model under the cursor", async () => {
     // the cursor's own row: the list is looked at again, then the letter alone, and never an Enter
     await withPane("claude", "idle", claudeModelList(1), async (pane) => {
@@ -4127,6 +4163,33 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 describe("Claude Code 2.1.29x approvals and questions", () => {
   const RULE = "─".repeat(80);
   const DASH = "╌".repeat(80);
+  test("accepts its exact background-agent footer, but not unknown trailing text", () => {
+    const footer = CLAUDE_BACKGROUND_APPROVAL_FOOTER;
+    for (const accepted of [
+      footer,
+      "Esc to cancel · Tab to amend",
+      "Esc to cancel · Tab to amend · ctrl+e to explain",
+      "Esc to cancel · ctrl+e to explain",
+      "Esc to cancel",
+    ]) {
+      const prompt = parseInteractivePrompt("claude", claudeBackgroundApproval(1, accepted));
+      expect(prompt).toMatchObject({
+        kind: "approval",
+        title: "Bash command · from the general-purpose agent",
+        question: "Do you want to proceed?",
+      });
+      expect(labels(prompt)).toEqual(["Yes", "Yes, and don't ask again for: systemctl --user start demo.service", "No"]);
+    }
+    for (const unknown of [
+      "Esc to cancel Password:",
+      "Esc to cancel · Password:",
+      "Esc to cancel · unknown trailing text",
+      `${footer} · Password:`,
+    ]) {
+      expect(parseInteractivePrompt("claude", claudeBackgroundApproval(1, unknown))).toBeNull();
+    }
+  });
+
   test("an approval whose hint is Esc to cancel alone is a card", () => {
     const screen = [
       "● Bash(systemctl --user restart demo.service)",
