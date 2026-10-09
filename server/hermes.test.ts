@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,9 +10,11 @@ import {
   hermesBreadcrumbSession,
   hermesConversationPage,
   hermesDbPath,
+  hermesHomeInPsLine,
   hermesToolOutput,
   isHermesProcess,
   parseHermesRows,
+  processHermesHome,
   type HermesMessageRow,
 } from "./hermes.ts";
 import { ConversationNotStarted, HistoryChanged } from "./conversation.ts";
@@ -36,6 +38,36 @@ describe("hermes process identification", () => {
     expect(isHermesProcess({ name: "node", argv0: "node" })).toBe(false);
     expect(isHermesProcess({ name: "claude" })).toBe(false);
     expect(isHermesProcess({ name: "bash" })).toBe(false);
+  });
+});
+
+describe("a Hermes process's own store", () => {
+  it.skipIf(process.platform !== "linux" && process.platform !== "darwin")("reads HERMES_HOME from the process environment and caches it by process identity", async () => {
+    const home = mkdtempSync(join(tmpdir(), "hermes-process-home-"));
+    const child = Bun.spawn([process.execPath, "-e", "console.log('ready'); for await (const _ of Bun.stdin.stream()) {}"], {
+      env: { ...process.env, HERMES_HOME: home },
+      stdin: "pipe",
+      stdout: "pipe",
+    });
+    const argv = ["hermes", "--profile", "work"];
+    try {
+      await child.stdout.getReader().read();
+      expect(await processHermesHome(child.pid, argv)).toBe(home);
+      child.kill();
+      await child.exited;
+      expect(await processHermesHome(child.pid, argv)).toBe(home);
+    } finally {
+      child.kill();
+      await child.exited;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("reads the last HERMES_HOME assignment from a macOS process line", () => {
+    expect(hermesHomeInPsLine("python hermes HERMES_HOME=/tmp/arg HOME=/Users/alice HERMES_HOME=/Users/alice/Hermes Profiles/work TERM=xterm"))
+      .toBe("/Users/alice/Hermes Profiles/work");
+    expect(hermesHomeInPsLine("hermes HOME=/Users/alice TERM=xterm")).toBeNull();
+    expect(hermesHomeInPsLine("hermes HERMES_HOME= HOME=/Users/alice")).toBeNull();
   });
 });
 
@@ -370,7 +402,7 @@ describe("hermesConversationPage SQLite integration", () => {
     const newest = hermesConversationPage("s", dbPath);
     const older = hermesConversationPage("s", dbPath, { before: newest.cursor! });
     expect(newest.turns.flatMap(turn => turn.parts).filter(part => part.kind === "tool")).toHaveLength(0);
-    expect(newest.turns).toHaveLength(98);
+    expect(newest.turns).toHaveLength(99);
     const tools = older.turns.flatMap(turn => turn.parts).filter(part => part.kind === "tool");
     expect(tools).toHaveLength(2);
     expect(tools.map(tool => ({ summary: tool.summary, output: tool.output }))).toEqual([

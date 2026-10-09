@@ -51,7 +51,7 @@ import { forgetAllPiIndexes, forgetPiIndex, piAbandonedTurns, piBranchSegments }
 import { defaultDevinDbPath, DevinHistoryUnavailable, devinConversation, forgetDevinState } from "./devin.ts";
 import { trimOutput } from "./tool-output.ts";
 import { parseConversationMetadata } from "./conversation-metadata.ts";
-import { defaultHermesHome, forgetHermesTranscriptState, hermesConversationPage, hermesToolOutput, hermesTranscriptForPane } from "./hermes.ts";
+import { forgetHermesTranscriptState, hermesConversationPage, hermesToolOutput, hermesTranscriptForPane } from "./hermes.ts";
 import { invokedSkill } from "./skill-activity.ts";
 import { isContextClear, MAX_TURNS, parseOmpTranscript, piImageBlock, piMessage, piResults, toolSummary } from "./transcript-records.ts";
 
@@ -1056,7 +1056,7 @@ type ResolvedTranscript =
  * label: omo's own store is read only when omo is really running
  * in that pane, never on a matching cwd alone.
  */
-async function resolveTranscript(pane: HerdrPane, cwd: string, codexHome?: string, panes?: HerdrPane[], opencodeDb?: string): Promise<ResolvedTranscript> {
+async function resolveTranscript(pane: HerdrPane, cwd: string, codexHome?: string, panes?: HerdrPane[], opencodeDb?: string, hermesHome?: string): Promise<ResolvedTranscript> {
   const paneId = pane.pane_id;
   let agent = pane.agent ?? pane.agent_session?.agent ?? "";
   // herdr names no agent for this pane: a session report an earlier agent left behind says
@@ -1106,7 +1106,7 @@ async function resolveTranscript(pane: HerdrPane, cwd: string, codexHome?: strin
       return { source: "opencode-transcript", path, session };
     }
     if (agent === "hermes") {
-      const resolved = await hermesTranscriptForPane(pane, cwd, defaultHermesHome());
+      const resolved = await hermesTranscriptForPane(pane, cwd, hermesHome);
       return { source: "hermes-transcript", path: resolved.dbPath, sessionId: resolved.sessionId };
     }
     throw new ConversationUnavailable("no_recognized_transcript");
@@ -1177,7 +1177,7 @@ export function devinSessionForPane(pane: HerdrPane, panes: HerdrPane[], argv: s
  * shows the pages before it. A cursor from another file throws HistoryChanged.
  * `opencodeDb` is OpenCode's store, unset where OpenCode itself would find it.
  */
-export async function paneConversation(paneId: string, codexHome?: string, page: ConversationPage = {}, devinDbPath?: string, opencodeDb?: string): Promise<RecognizedConversation> {
+export async function paneConversation(paneId: string, codexHome?: string, page: ConversationPage = {}, devinDbPath?: string, opencodeDb?: string, hermesHome?: string): Promise<RecognizedConversation> {
   const snapshot = await sessionSnapshot();
   const pane = snapshot.panes.find((candidate) => candidate.pane_id === paneId);
   if (pane === undefined) throw new ConversationUnavailable("pane_not_found");
@@ -1219,7 +1219,7 @@ export async function paneConversation(paneId: string, codexHome?: string, page:
 
   let resolved: ResolvedTranscript;
   try {
-    resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes, opencodeDb);
+    resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes, opencodeDb, hermesHome);
   } catch (error) {
     if (error instanceof ConversationNotStarted) return onNotStarted(error);
     throw error;
@@ -1386,13 +1386,13 @@ const TOOL_REF = /^[A-Za-z0-9_:.-]{1,128}$/;
 const TOOL_OUTPUT_MAX = 2_000_000;
 
 /** The whole output of a tool call whose page output was cut, by its id; null when there is none. */
-export async function toolOutput(paneId: string, ref: string, codexHome?: string, opencodeDb?: string): Promise<string | null> {
+export async function toolOutput(paneId: string, ref: string, codexHome?: string, opencodeDb?: string, hermesHome?: string): Promise<string | null> {
   if (!TOOL_REF.test(ref)) return null;
   const snapshot = await sessionSnapshot();
   const pane = snapshot.panes.find((candidate) => candidate.pane_id === paneId);
   if (pane === undefined || typeof pane.cwd !== "string" || pane.cwd.length === 0) return null;
   let resolved: ResolvedTranscript;
-  try { resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes, opencodeDb); }
+  try { resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes, opencodeDb, hermesHome); }
   catch (error) { if (error instanceof ConversationUnavailable) return null; throw error; }
   if (resolved.source === "opencode-transcript") {
     const output = opencodeToolOutput(resolved.path, resolved.session, ref);

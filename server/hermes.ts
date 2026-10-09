@@ -1,14 +1,16 @@
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readlinkSync, statSync, type Stats } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readlinkSync, realpathSync, statSync, type Stats } from "node:fs";
+import { isAbsolute, join } from "node:path";
+import { readFile, stat } from "node:fs/promises";
 
 import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPane } from "../shared/protocol.ts";
 import { herdrRpc } from "./herdr/client.ts";
 import { answerVersion, ConversationNotStarted, ConversationUnavailable, type ConversationPage, HistoryChanged, type RecognizedConversation } from "./conversation.ts";
 import { toolSummary } from "./transcript-records.ts";
 import { trimOutput } from "./tool-output.ts";
+import { processStartedAt } from "./process-start.ts";
 
 export interface HermesMessageRow {
   id: number;
@@ -29,6 +31,41 @@ export function defaultHermesHome(userHome?: string): string {
 /** Locates the session database within the selected Hermes home. */
 export function hermesDbPath(hermesHome = defaultHermesHome()): string {
   return join(hermesHome, "state.db");
+}
+
+/** What processHermesHome found, by pid and argv, and when. */
+const processHomes = new Map<string, { home: string | null; at: number }>();
+const PROCESS_HOME_TTL_MS = 30_000;
+
+/** The HERMES_HOME in one macOS `ps -E -o command=` line. */
+export function hermesHomeInPsLine(text: string): string | null {
+  return [...text.matchAll(/(?:^|\s)HERMES_HOME=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s*$)/g)].at(-1)?.[1] || null;
+}
+
+/** The HERMES_HOME a process started with, cached because a process's environment does not change. */
+export async function processHermesHome(pid: number, argv: readonly string[] = []): Promise<string | null> {
+  const key = `${pid}\0${argv.join("\0")}`;
+  const known = processHomes.get(key);
+  if (known && Date.now() - known.at < PROCESS_HOME_TTL_MS) return known.home;
+  let home: string | null = null;
+  try {
+    if (process.platform === "linux") {
+      home = (await readFile(`/proc/${pid}/environ`, "utf8")).split("\0").find((entry) => entry.startsWith("HERMES_HOME="))?.slice(12) || null;
+    } else if (process.platform === "darwin") {
+      const child = Bun.spawn(["/bin/ps", "-E", "-ww", "-p", String(pid), "-o", "command="], { stdout: "pipe", stderr: "ignore" });
+      const timer = setTimeout(() => child.kill(), 3000);
+      try {
+        const text = await new Response(child.stdout).text();
+        await child.exited;
+        home = hermesHomeInPsLine(text);
+      } finally { clearTimeout(timer); }
+    }
+    if (home === null || !isAbsolute(home) || !(await stat(home)).isDirectory()) home = null;
+  } catch { home = null; }
+  processHomes.delete(key);
+  processHomes.set(key, { home, at: Date.now() });
+  if (processHomes.size > 256) processHomes.delete(processHomes.keys().next().value!);
+  return home;
 }
 
 /** Recognizes the Hermes executable, including Python launching its entrypoint. */
@@ -68,15 +105,17 @@ export function hermesTerminalId(pid: number): string | null {
   return null;
 }
 
-/** Reads a terminal's reported session, refusing a breadcrumb from another cwd. */
-export function hermesBreadcrumbSession(home: string, terminalId: string, cwd: string): string | null {
+/** Reads a breadcrumb written during this Hermes process's lifetime for the same canonical cwd. */
+export function hermesBreadcrumbSession(home: string, terminalId: string, cwd: string, startedAt: number): string | null {
+  if (!Number.isFinite(startedAt)) return null;
   try {
     const marker = join(home, "terminal-sessions", terminalId);
-    if (!existsSync(marker)) return null;
-    const text = readFileSync(marker, "utf8");
-    const data = JSON.parse(text) as { session_id?: unknown; cwd?: unknown };
-    if (typeof data.session_id !== "string" || !data.session_id) return null;
-    if (typeof data.cwd === "string" && data.cwd !== cwd) return null;
+    const markerStat = statSync(marker);
+    if (!markerStat.isFile() || markerStat.size > 8192) return null;
+    const data = JSON.parse(readFileSync(marker, "utf8")) as { session_id?: unknown; cwd?: unknown; ts?: unknown };
+    if (typeof data.session_id !== "string" || data.session_id.trim().length === 0) return null;
+    if (typeof data.cwd !== "string" || realpathSync(data.cwd) !== realpathSync(cwd)) return null;
+    if (typeof data.ts !== "number" || !Number.isFinite(data.ts) || data.ts * 1000 < startedAt - 1000) return null;
     return data.session_id;
   } catch {
     return null;
@@ -84,13 +123,13 @@ export function hermesBreadcrumbSession(home: string, terminalId: string, cwd: s
 }
 
 /**
- * Resolves the Hermes session ID for a pane.
- * Checks Herdr agent.get report first, then falls back to terminal breadcrumbs.
+ * Resolves the Hermes session and store for a pane. A reported session is authoritative;
+ * one process lookup supplies the pane's store and, when needed, breadcrumb evidence.
  */
 export async function hermesTranscriptForPane(
   pane: HerdrPane,
   cwd: string,
-  hermesHome = defaultHermesHome(),
+  configuredHome?: string,
 ): Promise<{ sessionId: string; dbPath: string }> {
   const paneId = pane.pane_id;
   let sessionId = typeof pane.agent_session?.value === "string" && pane.agent_session.value.length > 0
@@ -106,22 +145,31 @@ export async function hermesTranscriptForPane(
       sessionId = info.agent.agent_session.value;
     }
   }
-  if (sessionId === null) {
+
+  let hermesProcess: { pid: number; name?: string; argv0?: string; argv?: string[] } | undefined;
+  if (configuredHome === undefined || sessionId === null) {
     const processInfo = await herdrRpc<{
       process_info?: { foreground_processes?: { pid: number; name?: string; argv0?: string; argv?: string[] }[] };
     }>("pane.process_info", { pane_id: paneId }).catch(() => null);
+    hermesProcess = (processInfo?.process_info?.foreground_processes ?? []).find(isHermesProcess);
+  }
 
-    const hermesProc = (processInfo?.process_info?.foreground_processes ?? []).find(isHermesProcess);
-    if (hermesProc) {
-      const termId = hermesTerminalId(hermesProc.pid);
-      if (termId) sessionId = hermesBreadcrumbSession(hermesHome, termId, cwd);
+  const processHome = configuredHome === undefined && hermesProcess !== undefined
+    ? await processHermesHome(hermesProcess.pid, hermesProcess.argv ?? [])
+    : null;
+  const hermesHome = configuredHome ?? processHome ?? defaultHermesHome();
+
+  if (sessionId === null && hermesProcess !== undefined) {
+    const termId = hermesTerminalId(hermesProcess.pid);
+    const startedAt = processStartedAt(hermesProcess.pid);
+    if (termId !== null && startedAt !== null) {
+      sessionId = hermesBreadcrumbSession(hermesHome, termId, cwd, startedAt);
     }
   }
 
   if (sessionId === null) throw new ConversationUnavailable("no_session_path");
   const dbPath = hermesDbPath(hermesHome);
   if (!existsSync(dbPath)) throw new ConversationUnavailable("transcript_missing");
-
   return { sessionId, dbPath };
 }
 
@@ -134,6 +182,7 @@ const hermesCache = new Map<string, {
 export function forgetHermesTranscriptState(path?: string): void {
   if (path === undefined) {
     hermesCache.clear();
+    processHomes.clear();
     return;
   }
   for (const key of [...hermesCache.keys()]) {
