@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import { createServer } from "./index.ts";
 import { herdrRpc, sessionSnapshot, workspaceClose, workspaceCreate } from "./herdr/client.ts";
-import type { ConversationResponse } from "../shared/protocol.ts";
+import type { ConversationPart, ConversationResponse } from "../shared/protocol.ts";
 import { forgetTranscriptState } from "./conversation.ts";
 import { hermesTerminalId, isHermesProcess, processHermesHome } from "./hermes.ts";
 
@@ -201,12 +201,20 @@ it("loads the whole output of a tool result cut in the conversation page", async
       .run(sessionId, output);
   } finally { db.close(); }
   const conversation = await read();
-  const tool = conversation.turns.flatMap(turn => turn.parts).find(part => part.kind === "tool" && part.output_ref === "large-tool");
-  expect(tool).toMatchObject({ output_ref: "large-tool", output_size: output.length });
-  const query = new URLSearchParams({ pane_id: paneId, ref: "large-tool" });
+  const tool = conversation.turns
+    .flatMap(turn => turn.parts)
+    .find((part): part is Extract<ConversationPart, { kind: "tool" }> => part.kind === "tool" && part.name === "execute_code");
+  expect(tool).toBeDefined();
+  expect(tool?.output_ref).toMatch(/^[A-Za-z0-9_-]{16}:large-tool$/);
+  expect(tool?.output_size).toBe(output.length);
+  const query = new URLSearchParams({ pane_id: paneId, ref: tool!.output_ref! });
   const response = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation/tool-output?${query}`);
   expect(response.status).toBe(200);
   expect(await response.text()).toBe(output);
+
+  const bareQuery = new URLSearchParams({ pane_id: paneId, ref: "large-tool" });
+  const bareResp = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation/tool-output?${bareQuery}`);
+  expect(bareResp.status).toBe(404);
 });
 
 it("falls back to scrollback when the Hermes database is corrupt or incompatible", async () => {
@@ -227,6 +235,75 @@ it("falls back to scrollback when the Hermes database is corrupt or incompatible
     expect(toolResp.status).toBe(404);
   } finally {
     corruptServer.stop();
+  }
+});
+
+it("scopes full tool output references to transcript generation and rejects cross-session reused IDs", async () => {
+  const output1 = "Session 1 output.\n".repeat(300);
+  const output2 = "Session 2 output.\n".repeat(300);
+  const s1 = "session-1";
+  const s2 = "session-2";
+  const db = new Database(dbPath);
+  try {
+    db.query("INSERT INTO sessions (id, model, started_at) VALUES (?, 'm', 1700000100)").run(s1);
+    db.query("INSERT INTO sessions (id, model, started_at) VALUES (?, 'm', 1700000200)").run(s2);
+    db.query("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES (?, 'assistant', ?, 1700000101)")
+      .run(s1, JSON.stringify([{ id: "reused-tool", function: { name: "bash", arguments: "{}" } }]));
+    db.query("INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp) VALUES (?, 'tool', ?, 'reused-tool', 'bash', 1700000102)")
+      .run(s1, output1);
+    db.query("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES (?, 'assistant', ?, 1700000201)")
+      .run(s2, JSON.stringify([{ id: "reused-tool", function: { name: "bash", arguments: "{}" } }]));
+    db.query("INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp) VALUES (?, 'tool', ?, 'reused-tool', 'bash', 1700000202)")
+      .run(s2, output2);
+  } finally { db.close(); }
+
+  const ws1 = await workspaceCreate({ cwd: root, label: "herdr-test-cross-1" });
+  const p1 = ws1.root_pane.pane_id;
+  await herdrRpc("pane.report_agent", { pane_id: p1, source: "herdr:hermes", agent: "hermes", state: "idle", seq: ++seq });
+  await herdrRpc("pane.report_agent_session", { pane_id: p1, source: "herdr:hermes", agent: "hermes", seq: ++seq, agent_session_id: s1, session_start_source: "startup" });
+
+  const ws2 = await workspaceCreate({ cwd: root, label: "herdr-test-cross-2" });
+  const p2 = ws2.root_pane.pane_id;
+  await herdrRpc("pane.report_agent", { pane_id: p2, source: "herdr:hermes", agent: "hermes", state: "idle", seq: ++seq });
+  await herdrRpc("pane.report_agent_session", { pane_id: p2, source: "herdr:hermes", agent: "hermes", seq: ++seq, agent_session_id: s2, session_start_source: "startup" });
+
+  try {
+    const qResp1 = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation?pane_id=${encodeURIComponent(p1)}`);
+    const conv1 = await qResp1.json() as ConversationResponse;
+    const tool1 = conv1.turns.flatMap(turn => turn.parts).find(part => part.kind === "tool");
+    expect(tool1?.output_ref).toBeDefined();
+
+    const qResp2 = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation?pane_id=${encodeURIComponent(p2)}`);
+    const conv2 = await qResp2.json() as ConversationResponse;
+    const tool2 = conv2.turns.flatMap(turn => turn.parts).find(part => part.kind === "tool");
+    expect(tool2?.output_ref).toBeDefined();
+
+    expect(tool1!.output_ref).not.toBe(tool2!.output_ref);
+
+    const q1 = new URLSearchParams({ pane_id: p1, ref: tool1!.output_ref! });
+    const resp1 = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation/tool-output?${q1}`);
+    expect(resp1.status).toBe(200);
+    expect(await resp1.text()).toBe(output1);
+
+    const q2 = new URLSearchParams({ pane_id: p2, ref: tool2!.output_ref! });
+    const resp2 = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation/tool-output?${q2}`);
+    expect(resp2.status).toBe(200);
+    expect(await resp2.text()).toBe(output2);
+
+    const cross1 = new URLSearchParams({ pane_id: p1, ref: tool2!.output_ref! });
+    const crossResp1 = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation/tool-output?${cross1}`);
+    expect(crossResp1.status).toBe(404);
+
+    const cross2 = new URLSearchParams({ pane_id: p2, ref: tool1!.output_ref! });
+    const crossResp2 = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation/tool-output?${cross2}`);
+    expect(crossResp2.status).toBe(404);
+
+    const bare = new URLSearchParams({ pane_id: p1, ref: "reused-tool" });
+    const bareResp = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation/tool-output?${bare}`);
+    expect(bareResp.status).toBe(404);
+  } finally {
+    await workspaceClose(ws1.workspace.workspace_id);
+    await workspaceClose(ws2.workspace.workspace_id);
   }
 });
 

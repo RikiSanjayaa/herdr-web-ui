@@ -476,9 +476,12 @@ describe("hermesConversationPage SQLite integration", () => {
       db.query("INSERT INTO messages (session_id, role, content, tool_call_id, timestamp) VALUES (?, 'tool', ?, 'shared-call', 1700000003)").run("s", output);
       db.query("INSERT INTO messages (session_id, role, content, tool_call_id, timestamp) VALUES (?, 'tool', ?, 'shared-call', 1700000004)").run("another-session", "Another pane's output");
     } finally { db.close(); }
-    expect(hermesToolOutput("s", dbPath, "shared-call", 2_000_000)).toBe(output);
+    const page = hermesConversationPage("s", dbPath);
+    const tool = page.turns.flatMap(t => t.parts).find((p): p is Extract<ConversationPart, { kind: "tool" }> => p.kind === "tool");
+    expect(tool?.output_ref).toBeDefined();
+    expect(hermesToolOutput("s", dbPath, tool!.output_ref!, 2_000_000)).toBe(output);
     expect(hermesToolOutput("s", dbPath, "missing-call", 2_000_000)).toBeNull();
-    expect(hermesToolOutput("s", dbPath, "shared-call", 20)).toBe(output.slice(0, 20));
+    expect(hermesToolOutput("s", dbPath, tool!.output_ref!, 20)).toBe(output.slice(0, 20));
   });
 
   it("changes history identity and refuses held cursors after database replacement", () => {
@@ -506,12 +509,12 @@ describe("hermesConversationPage SQLite integration", () => {
     const newest = hermesConversationPage("s", dbPath);
     const tool = newest.turns
       .flatMap(turn => turn.parts)
-      .find((part): part is Extract<ConversationPart, { kind: "tool" }> => part.kind === "tool" && part.output_ref === "tool-preview");
+      .find((part): part is Extract<ConversationPart, { kind: "tool" }> => part.kind === "tool" && part.name === "bash");
     expect(tool).toBeDefined();
     expect(tool?.output_size).toBe(50_000);
     expect(tool?.output).toBe(`${"a".repeat(4000)}\n… trimmed`);
     expect(tool?.output.length).toBeLessThan(4100);
-    expect(hermesToolOutput("s", dbPath, "tool-preview", 2_000_000)).toBe(storedOutput);
+    expect(hermesToolOutput("s", dbPath, tool!.output_ref!, 2_000_000)).toBe(storedOutput);
   });
 
   it("clips a single oversized non-tool row and marks it trimmed while returning the row", () => {
@@ -666,5 +669,37 @@ describe("hermesConversationPage SQLite integration", () => {
     const tools = page.turns[1]!.parts.filter((p): p is Extract<ConversationPart, { kind: "tool" }> => p.kind === "tool");
     expect(tools).toHaveLength(1);
     expect(tools[0]!.summary).toBe("ls");
+  });
+
+  it("scopes full tool output references to transcript generation and rejects cross-session reused IDs", () => {
+    const db = new Database(dbPath);
+    const outputA = "output-a-".repeat(500);
+    const outputB = "output-b-".repeat(500);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('s-a', 'm', 1700000100)").run();
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('s-b', 'm', 1700000200)").run();
+      db.query("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('s-a', 'assistant', ?, 1700000101)")
+        .run(JSON.stringify([{ id: "reused-call", function: { name: "bash", arguments: "{}" } }]));
+      db.query("INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp) VALUES ('s-a', 'tool', ?, 'reused-call', 'bash', 1700000102)").run(outputA);
+      db.query("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('s-b', 'assistant', ?, 1700000201)")
+        .run(JSON.stringify([{ id: "reused-call", function: { name: "bash", arguments: "{}" } }]));
+      db.query("INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp) VALUES ('s-b', 'tool', ?, 'reused-call', 'bash', 1700000202)").run(outputB);
+    } finally { db.close(); }
+
+    const pageA = hermesConversationPage("s-a", dbPath);
+    const pageB = hermesConversationPage("s-b", dbPath);
+    const refA = pageA.turns[0]!.parts.find((p): p is Extract<ConversationPart, { kind: "tool" }> => p.kind === "tool")?.output_ref;
+    const refB = pageB.turns[0]!.parts.find((p): p is Extract<ConversationPart, { kind: "tool" }> => p.kind === "tool")?.output_ref;
+
+    expect(refA).toBeDefined();
+    expect(refB).toBeDefined();
+    expect(refA).not.toBe(refB);
+
+    expect(hermesToolOutput("s-a", dbPath, refA!, 2_000_000)).toBe(outputA);
+    expect(hermesToolOutput("s-b", dbPath, refB!, 2_000_000)).toBe(outputB);
+    expect(hermesToolOutput("s-a", dbPath, refB!, 2_000_000)).toBeNull();
+    expect(hermesToolOutput("s-b", dbPath, refA!, 2_000_000)).toBeNull();
+    expect(hermesToolOutput("s-a", dbPath, "reused-call", 2_000_000)).toBeNull();
+    expect(hermesToolOutput("s-a", dbPath, "malformed:ref:extra", 2_000_000)).toBeNull();
   });
 });

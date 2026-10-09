@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readlinkSync, realpathSync, statSync, type Stats } from "node:fs";
+import { existsSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { readFile, stat } from "node:fs/promises";
 
@@ -238,17 +238,50 @@ export function forgetHermesTranscriptState(path?: string): void {
 
 const PAGE_SIZE = 100;
 
-/** Reads a bounded tool result by call ID from the selected session only. */
+/** Computes the 16-character generation identity for a Hermes session in a database. */
+export function hermesTranscriptIdentity(dbPath: string, startedAt: number | string = ""): string | null {
+  try {
+    const stat = statSync(dbPath);
+    return createHash("sha256").update(`${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${startedAt}`).digest("base64url").slice(0, 16);
+  } catch {
+    return null;
+  }
+}
+
+/** Formats an opaque generation-scoped full-output reference. */
+export function hermesOutputRef(identity: string, callId: string): string {
+  return `${identity}:${callId}`;
+}
+
+/** Parses an opaque full-output reference into generation identity and provider call ID. */
+export function parseHermesOutputRef(ref: string): { identity: string; callId: string } | null {
+  const colon = ref.indexOf(":");
+  if (colon <= 0 || colon === ref.length - 1) return null;
+  const identity = ref.slice(0, colon);
+  const callId = ref.slice(colon + 1);
+  if (identity.length !== 16 || callId.length === 0 || callId.length > 120) return null;
+  return { identity, callId };
+}
+
+/** Reads a bounded tool result by call ID from the selected session and transcript generation only. */
 export function hermesToolOutput(sessionId: string, dbPath: string, ref: string, maxChars: number): string | null {
+  const parsed = parseHermesOutputRef(ref);
+  if (!parsed) return null;
   let db: Database;
   try { db = new Database(dbPath, { readonly: true, create: false }); }
   catch { return null; }
   try {
+    const sessionRow = db.query<{ started_at: number | null }, [string]>(
+      "SELECT started_at FROM sessions WHERE id = ?",
+    ).get(sessionId);
+    const currentIdentity = hermesTranscriptIdentity(dbPath, sessionRow?.started_at ?? "");
+    if (!currentIdentity || currentIdentity !== parsed.identity) return null;
+
     const row = db.query<{ content: string | null }, [number, string, string]>(
       `SELECT substr(content, 1, ?) AS content FROM messages
        WHERE session_id = ? AND role = 'tool' AND tool_call_id = ? AND (active = 1 OR compacted = 1)
        ORDER BY id DESC LIMIT 1`,
-    ).get(maxChars, sessionId, ref);
+    ).get(maxChars, sessionId, parsed.callId);
     return row?.content?.slice(0, maxChars) ?? null;
   } catch {
     return null;
@@ -440,9 +473,8 @@ export function hermesConversationPage(
   dbPath: string,
   page: ConversationPage = {},
 ): RecognizedConversation {
-  let stat: Stats;
   try {
-    stat = statSync(dbPath);
+    statSync(dbPath);
   } catch {
     throw new ConversationUnavailable("transcript_missing");
   }
@@ -473,7 +505,8 @@ export function hermesConversationPage(
         throw new ConversationNotStarted(sessionId, "hermes-transcript");
       }
 
-      const identity = createHash("sha256").update(`${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${sessionRow?.started_at ?? ""}`).digest("base64url").slice(0, 16);
+      const identity = hermesTranscriptIdentity(dbPath, sessionRow?.started_at ?? "");
+      if (!identity) throw new ConversationUnavailable("transcript_missing");
       const historyId = `hermes:${sessionId}:${identity}`;
       const cacheKey = page.before !== undefined
         ? `${dbPath}\0${historyId}\0before:${page.before}:${page.since ?? ""}`
@@ -521,7 +554,7 @@ export function hermesConversationPage(
       if (cached?.signature === signature) {
         return { source: "hermes-transcript", turns: cached.turns, metadata, cursor, history_id: historyId, version };
       }
-      const turns = parseHermesRows(rows);
+      const turns = parseHermesRows(rows, identity);
       hermesCache.set(cacheKey, { signature, turns });
       if (hermesCache.size > 64) hermesCache.delete(hermesCache.keys().next().value!);
 
@@ -545,10 +578,10 @@ export function hermesConversationPage(
 }
 
 /** Groups assistant activity and matched tool results into turns, preserving recorded reasoning. */
-export function parseHermesRows(rows: readonly HermesMessageRow[]): ConversationTurn[] {
+export function parseHermesRows(rows: readonly HermesMessageRow[], identity?: string): ConversationTurn[] {
   const turns: ConversationTurn[] = [];
   const pendingTools = new Map<string, Extract<ConversationPart, { kind: "tool" }>>();
-
+  const makeRef = (callId: string) => identity ? hermesOutputRef(identity, callId) : callId;
   for (const row of rows) {
     try {
       const ts = parseTimestamp(row.timestamp);
@@ -608,7 +641,7 @@ export function parseHermesRows(rows: readonly HermesMessageRow[]): Conversation
         const output = typeof row.content === "string" ? row.content : "";
 
         if (toolPart) {
-          trimOutput(toolPart, output, callId, row.output_size ?? undefined);
+          trimOutput(toolPart, output, makeRef(callId), row.output_size ?? undefined);
           if (/^(?:error|failed|exception)\b/i.test(output.trim())) {
             toolPart.error = true;
           }
@@ -626,7 +659,7 @@ export function parseHermesRows(rows: readonly HermesMessageRow[]): Conversation
             input: "",
             output: "",
           };
-          trimOutput(orphan, output, callId, row.output_size ?? undefined);
+          trimOutput(orphan, output, makeRef(callId), row.output_size ?? undefined);
           if (/^(?:error|failed|exception)\b/i.test(output.trim())) {
             orphan.error = true;
           }
