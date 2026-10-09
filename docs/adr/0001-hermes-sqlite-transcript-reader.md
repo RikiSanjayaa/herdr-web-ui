@@ -1,21 +1,20 @@
-# Read Hermes transcripts directly from SQLite via bun:sqlite
+# Read bounded Hermes transcripts from the pane's SQLite store
 
-The bridge reads Hermes conversation turns directly from its local SQLite database (`~/.hermes/state.db`) using `bun:sqlite` in read-only mode, rather than running CLI export subprocesses or converting databases to JSONL.
+Hermes stores conversation history in `state.db`, so the bridge reads that database directly with read-only `bun:sqlite` rather than running export subprocesses or creating intermediate JSONL files. The selected store belongs to the Hermes process in the pane: an explicit bridge override wins, then that process's `HERMES_HOME`, then the bridge default.
 
 ## Status
 
 accepted
 
-## Context
-
-Existing agents supported by herdr-web-ui (Claude, Codex, omp, omo, gjc, pi) store conversation transcripts in JSONL files. Hermes stores session metadata and messages in an SQLite database (`~/.hermes/state.db`).
-
 ## Decision
 
-Use Bun's built-in `bun:sqlite` with `readonly: true` to query `messages` and `sessions` tables directly in `server/hermes.ts`. Pagination uses bounded queries over message ID ranges (`WHERE session_id = ? AND id < ? ORDER BY id DESC LIMIT ?`).
+`server/hermes.ts` queries the `messages` and `sessions` tables through one reader interface. Each transcript page is a contiguous segment capped at 100 rows and 16 MiB, even when that splits an exchange; large tool output is previewed in the page and read in full through its transcript-generation-scoped reference. Cursors and output references are valid only within the database generation that produced them.
+
+A herdr session report is primary session evidence. A terminal breadcrumb is accepted only when its cwd matches and it was written during the current Hermes process's lifetime. SQLite availability, locking, corruption, and incompatible-schema failures make the native transcript unavailable so the chat can fall back to terminal scrollback; one malformed message is isolated instead of invalidating the page.
 
 ## Consequences
 
-- Avoids subprocess overhead and intermediate file writes during chat polling.
-- Introduces no new dependencies.
-- Hermes schema changes to `messages` or `sessions` must maintain backward compatibility in the query logic.
+- Polling cost is bounded for long autonomous exchanges.
+- Multiple Hermes profiles on one machine resolve to the store used by each pane.
+- A page may begin with assistant or tool activity from an exchange that started on an earlier page.
+- Hermes schema changes remain isolated in the reader. Unsupported schemas lose the native view but not the terminal fallback.
