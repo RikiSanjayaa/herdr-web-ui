@@ -651,6 +651,23 @@ describe("hermesConversationPage SQLite integration", () => {
     expect(new Set(visitedToolRefs).size).toBe(2000);
   });
 
+  it("measures multibyte UTF-8 characters by bytes when bounding pages", () => {
+    const db = new Database(dbPath);
+    const sixMb = "🦀".repeat(1_500_000);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('utf8-session', 'm', 1700000000)").run();
+      const insert = db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('utf8-session', 'user', ?, ?)");
+      db.transaction(() => {
+        for (let i = 1; i <= 3; i++) insert.run(`msg-${i}: ${sixMb}`, 1700000000 + i);
+      })();
+    } finally { db.close(); }
+
+    const newest = hermesConversationPage("utf8-session", dbPath);
+    expect(newest.turns).toHaveLength(2);
+    const older = hermesConversationPage("utf8-session", dbPath, { before: newest.cursor! });
+    expect(older.turns).toHaveLength(1);
+  });
+
   it("converts database query, schema, and corruption errors into ConversationUnavailable", () => {
     const corruptDb = join(tempDir, "corrupt.db");
     writeFileSync(corruptDb, "not a sqlite database");

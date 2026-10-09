@@ -357,11 +357,11 @@ function hermesRowsBefore(db: Database, sessionId: string, before: number, floor
     `SELECT id, role, tool_call_id, tool_calls,
        COALESCE(
          CASE
-           WHEN role = 'tool' THEN octet_length(substr(content, 1, ?))
-           ELSE octet_length(content)
+           WHEN role = 'tool' THEN length(CAST(substr(content, 1, ?) AS BLOB))
+           ELSE length(CAST(content AS BLOB))
          END,
          0
-       ) + COALESCE(octet_length(tool_calls), 0) + COALESCE(octet_length(reasoning), 0) + COALESCE(octet_length(role), 0) + COALESCE(octet_length(tool_name), 0) + COALESCE(octet_length(tool_call_id), 0) AS text_bytes
+       ) + COALESCE(length(CAST(tool_calls AS BLOB)), 0) + COALESCE(length(CAST(reasoning AS BLOB)), 0) + COALESCE(length(CAST(role AS BLOB)), 0) + COALESCE(length(CAST(tool_name AS BLOB)), 0) + COALESCE(length(CAST(tool_call_id AS BLOB)), 0) AS text_bytes
      FROM messages
      WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
      ORDER BY id DESC LIMIT ?`,
@@ -405,7 +405,7 @@ function hermesRowsBefore(db: Database, sessionId: string, before: number, floor
        CASE WHEN role = 'tool' THEN substr(content, 1, ?) ELSE substr(content, 1, ?) END AS content,
        tool_call_id, tool_calls, tool_name, reasoning, timestamp,
        CASE WHEN role = 'tool' THEN length(content) ELSE NULL END AS output_size,
-       CASE WHEN role != 'tool' THEN octet_length(content) ELSE NULL END AS content_bytes
+       CASE WHEN role != 'tool' THEN length(CAST(content AS BLOB)) ELSE NULL END AS content_bytes
      FROM messages
      WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
      ORDER BY id ASC LIMIT ?`,
@@ -429,11 +429,11 @@ function hermesRowsFrom(db: Database, sessionId: string, start: number): HermesM
     `SELECT id, role, tool_call_id, tool_calls,
        COALESCE(
          CASE
-           WHEN role = 'tool' THEN octet_length(substr(content, 1, ?))
-           ELSE octet_length(content)
+           WHEN role = 'tool' THEN length(CAST(substr(content, 1, ?) AS BLOB))
+           ELSE length(CAST(content AS BLOB))
          END,
          0
-       ) + COALESCE(octet_length(tool_calls), 0) + COALESCE(octet_length(reasoning), 0) + COALESCE(octet_length(role), 0) + COALESCE(octet_length(tool_name), 0) + COALESCE(octet_length(tool_call_id), 0) AS text_bytes
+       ) + COALESCE(length(CAST(tool_calls AS BLOB)), 0) + COALESCE(length(CAST(reasoning AS BLOB)), 0) + COALESCE(length(CAST(role AS BLOB)), 0) + COALESCE(length(CAST(tool_name AS BLOB)), 0) + COALESCE(length(CAST(tool_call_id AS BLOB)), 0) AS text_bytes
      FROM messages
      WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ?
      ORDER BY id ASC LIMIT ?`,
@@ -463,7 +463,7 @@ function hermesRowsFrom(db: Database, sessionId: string, start: number): HermesM
        CASE WHEN role = 'tool' THEN substr(content, 1, ?) ELSE substr(content, 1, ?) END AS content,
        tool_call_id, tool_calls, tool_name, reasoning, timestamp,
        CASE WHEN role = 'tool' THEN length(content) ELSE NULL END AS output_size,
-       CASE WHEN role != 'tool' THEN octet_length(content) ELSE NULL END AS content_bytes
+       CASE WHEN role != 'tool' THEN length(CAST(content AS BLOB)) ELSE NULL END AS content_bytes
      FROM messages
      WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id <= ?
      ORDER BY id ASC LIMIT ?`,
