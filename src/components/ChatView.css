@@ -277,6 +277,10 @@
   white-space: pre-wrap;
 }
 
+[data-conversation-source="hermes-transcript"] .markdown p {
+  white-space: pre-line;
+}
+
 /* Every agent heading is an h3 (Markdown.tsx: an agent's markdown must not shadow the app's own
    h1/h2 outline), so the tag says nothing about the level and the level class is what these
    rules key off — the same drawing as before the remap, level by level. */

@@ -83,6 +83,7 @@ export interface ChatViewProps {
 
 interface ChatState {
   source: "conversation" | "scrollback";
+  conversationSource?: string;
   turns: ConversationTurn[];
   messages: TranscriptMessage[];
   truncated: boolean;
@@ -680,7 +681,7 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
         onMetadata?.(paneId, conversation.source === "scrollback" ? null : conversation.metadata ?? null);
         setAbandoned(conversation.abandoned ?? null);
         let next: ChatState;
-        if (conversation.source !== "scrollback") next = { source: "conversation", turns: conversation.turns, messages: [], truncated: false };
+        if (conversation.source !== "scrollback") next = { source: "conversation", conversationSource: conversation.source, turns: conversation.turns, messages: [], truncated: false };
         else {
           const result = await fetchPaneTranscript(paneId, TRANSCRIPT_LINES);
           if (cancelled) return;
@@ -868,7 +869,7 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
   useLayoutEffect(() => () => onRead?.(paneId, null), [onRead, paneId]);
 
   return <ChatPaneContext.Provider value={paneId}><ChatHistoryContext.Provider value={historyId ?? ""}><div className="chat-view" ref={scroller} onScroll={onScroll} role="log" aria-live="polite" aria-label={t("conversation of {pane}", { pane: paneId })}>
-    <div className="chat-transcript">
+    <div className="chat-transcript" data-conversation-source={state.conversationSource}>
       {/* the conversation below is not all the file holds: a /tree left these behind, and pi moved
           its leaf without writing anything, so nothing here could say they were ever there. First
           in the transcript, because paging back would otherwise drop them under their own heading */}

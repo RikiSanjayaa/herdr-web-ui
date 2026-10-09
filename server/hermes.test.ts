@@ -12,6 +12,7 @@ import {
   hermesDbPath,
   hermesHomeInPsLine,
   hermesToolOutput,
+  hermesToolSummary,
   isHermesProcess,
   parseHermesRows,
   processHermesHome,
@@ -106,9 +107,54 @@ describe("hermes terminal breadcrumb resolution", () => {
 });
 
 describe("hermes message rows parsing", () => {
-  it("uses a file summary when a tool's code is blank", () => {
-    expect(toolSummary("write_file", { code: " \n ", file_path: "example.ts" })).toBe("example.ts");
-    expect(toolSummary("execute_code", { code: "\nprint('hello')\nprint('world')" })).toBe("print('hello')");
+  it("uses the first nonblank code line for Hermes code calls, falling back to file and other fields", () => {
+    expect(hermesToolSummary("execute_code", { code: "\nprint('hello')\nprint('world')", file_path: "script.py" })).toBe("print('hello')");
+    expect(hermesToolSummary("write_file", { code: " \n ", file_path: "example.ts" })).toBe("example.ts");
+    expect(hermesToolSummary("custom_tool", { description: "Do something" })).toBe("Do something");
+  });
+
+  it("leaves shared toolSummary precedence unchanged for non-Hermes callers", () => {
+    expect(toolSummary("execute_code", { code: "print('hello')", file_path: "script.py" })).toBe("script.py");
+    expect(toolSummary("write_file", { code: "let x = 1;", path: "test.js" })).toBe("test.js");
+  });
+
+  it("decodes terminal tool envelopes, marks nonzero exits and errors failed, and preserves invalid/non-terminal JSON", () => {
+    const rows: HermesMessageRow[] = [
+      {
+        id: 1, role: "assistant", content: null, tool_call_id: null,
+        tool_calls: JSON.stringify([
+          { id: "call-ok", function: { name: "bash", arguments: "{}" } },
+          { id: "call-exit", function: { name: "bash", arguments: "{}" } },
+          { id: "call-err", function: { name: "terminal", arguments: "{}" } },
+          { id: "call-raw", function: { name: "bash", arguments: "{}" } },
+          { id: "call-other", function: { name: "web_search", arguments: "{}" } },
+        ]),
+        tool_name: null, reasoning: null, timestamp: 1700000001,
+      },
+      { id: 2, role: "tool", content: JSON.stringify({ output: "command succeeded\n", exit_code: 0 }), tool_call_id: "call-ok", tool_calls: null, tool_name: "bash", reasoning: null, timestamp: 1700000002 },
+      { id: 3, role: "tool", content: JSON.stringify({ output: "command failed\n", exit_code: 2 }), tool_call_id: "call-exit", tool_calls: null, tool_name: "bash", reasoning: null, timestamp: 1700000003 },
+      { id: 4, role: "tool", content: JSON.stringify({ output: "timed out\n", exit_code: 0, error: "process timeout" }), tool_call_id: "call-err", tool_calls: null, tool_name: "terminal", reasoning: null, timestamp: 1700000004 },
+      { id: 5, role: "tool", content: "not a json envelope", tool_call_id: "call-raw", tool_calls: null, tool_name: "bash", reasoning: null, timestamp: 1700000005 },
+      { id: 6, role: "tool", content: JSON.stringify({ output: "json payload", exit_code: 0 }), tool_call_id: "call-other", tool_calls: null, tool_name: "web_search", reasoning: null, timestamp: 1700000006 },
+    ];
+
+    const turns = parseHermesRows(rows);
+    const tools = turns[0]!.parts.filter((p): p is Extract<ConversationPart, { kind: "tool" }> => p.kind === "tool");
+    expect(tools).toHaveLength(5);
+
+    expect(tools[0]!.output).toBe("command succeeded\n");
+    expect(tools[0]!.error).toBeUndefined();
+
+    expect(tools[1]!.output).toBe("command failed\n");
+    expect(tools[1]!.error).toBe(true);
+
+    expect(tools[2]!.output).toBe("timed out\n");
+    expect(tools[2]!.error).toBe(true);
+
+    expect(tools[3]!.output).toBe("not a json envelope");
+
+    expect(tools[4]!.output).toBe(JSON.stringify({ output: "json payload", exit_code: 0 }));
+    expect(tools[4]!.error).toBeUndefined();
   });
 
   it("maps user, assistant, thinking, tool calls and tool outputs to conversation turns", () => {

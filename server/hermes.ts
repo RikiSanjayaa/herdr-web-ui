@@ -263,6 +263,42 @@ export function parseHermesOutputRef(ref: string): { identity: string; callId: s
   return { identity, callId };
 }
 
+const TERMINAL_TOOLS = new Set(["bash", "terminal", "sh", "exec", "execute_command", "shell"]);
+
+export function isTerminalTool(name?: string | null): boolean {
+  return typeof name === "string" && TERMINAL_TOOLS.has(name.toLowerCase());
+}
+
+export function decodeTerminalEnvelope(raw: string): { output: string; failed: boolean } | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
+    if (typeof obj["output"] !== "string") return null;
+    let failed = false;
+    const exitCode = obj["exit_code"];
+    if (typeof exitCode === "number" && Number.isFinite(exitCode) && exitCode !== 0) {
+      failed = true;
+    }
+    const err = obj["error"];
+    if (typeof err === "string" && err.trim().length > 0) {
+      failed = true;
+    }
+    return { output: obj["output"], failed };
+  } catch {
+    return null;
+  }
+}
+
+/** Hermes code-execution calls summarize with the first nonblank code line, falling back to file and standard fields. */
+export function hermesToolSummary(name: string, input: Record<string, unknown>): string {
+  if (typeof input["code"] === "string") {
+    const firstLine = input["code"].split("\n").map(l => l.trim()).find(l => l.length > 0);
+    if (firstLine) return firstLine.slice(0, 120);
+  }
+  return toolSummary(name, input);
+}
+
 /** Reads a bounded tool result by call ID from the selected session and transcript generation only. */
 export function hermesToolOutput(sessionId: string, dbPath: string, ref: string, maxChars: number): string | null {
   const parsed = parseHermesOutputRef(ref);
@@ -277,12 +313,15 @@ export function hermesToolOutput(sessionId: string, dbPath: string, ref: string,
     const currentIdentity = hermesTranscriptIdentity(dbPath, sessionRow?.started_at ?? "");
     if (!currentIdentity || currentIdentity !== parsed.identity) return null;
 
-    const row = db.query<{ content: string | null }, [number, string, string]>(
-      `SELECT substr(content, 1, ?) AS content FROM messages
+    const row = db.query<{ content: string | null; tool_name: string | null }, [number, string, string]>(
+      `SELECT substr(content, 1, ?) AS content, tool_name FROM messages
        WHERE session_id = ? AND role = 'tool' AND tool_call_id = ? AND (active = 1 OR compacted = 1)
        ORDER BY id DESC LIMIT 1`,
     ).get(maxChars, sessionId, parsed.callId);
-    return row?.content?.slice(0, maxChars) ?? null;
+    if (!row?.content) return row?.content ?? null;
+    const decoded = isTerminalTool(row.tool_name) ? decodeTerminalEnvelope(row.content) : null;
+    const text = decoded !== null ? decoded.output : row.content;
+    return text.slice(0, maxChars);
   } catch {
     return null;
   } finally {
@@ -617,7 +656,7 @@ export function parseHermesRows(rows: readonly HermesMessageRow[], identity?: st
                 const name = String(fn.name ?? call.name ?? "tool");
                 const rawArgs = "arguments" in fn ? fn.arguments : "arguments" in call ? call.arguments : "{}";
                 const { inputStr, inputObj } = parseToolInput(rawArgs);
-                const summary = toolSummary(name, inputObj);
+                const summary = hermesToolSummary(name, inputObj);
                 const toolPart: Extract<ConversationPart, { kind: "tool" }> = {
                   kind: "tool",
                   name,
@@ -638,13 +677,15 @@ export function parseHermesRows(rows: readonly HermesMessageRow[], identity?: st
       } else if (row.role === "tool") {
         const callId = row.tool_call_id ?? "";
         const toolPart = pendingTools.get(callId);
-        const output = typeof row.content === "string" ? row.content : "";
+        const rawOutput = typeof row.content === "string" ? row.content : "";
+        const toolName = toolPart?.name ?? row.tool_name ?? "";
+        const decoded = isTerminalTool(toolName) ? decodeTerminalEnvelope(rawOutput) : null;
+        const output = decoded !== null ? decoded.output : rawOutput;
+        const isFailed = decoded !== null ? decoded.failed : /^(?:error|failed|exception)\b/i.test(output.trim());
 
         if (toolPart) {
           trimOutput(toolPart, output, makeRef(callId), row.output_size ?? undefined);
-          if (/^(?:error|failed|exception)\b/i.test(output.trim())) {
-            toolPart.error = true;
-          }
+          if (isFailed) toolPart.error = true;
           pendingTools.delete(callId);
         } else {
           let turn = turns[turns.length - 1];
@@ -660,9 +701,7 @@ export function parseHermesRows(rows: readonly HermesMessageRow[], identity?: st
             output: "",
           };
           trimOutput(orphan, output, makeRef(callId), row.output_size ?? undefined);
-          if (/^(?:error|failed|exception)\b/i.test(output.trim())) {
-            orphan.error = true;
-          }
+          if (isFailed) orphan.error = true;
           turn.parts.push(orphan);
         }
       }
