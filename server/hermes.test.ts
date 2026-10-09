@@ -17,7 +17,8 @@ import {
   processHermesHome,
   type HermesMessageRow,
 } from "./hermes.ts";
-import { ConversationNotStarted, HistoryChanged } from "./conversation.ts";
+import { ConversationNotStarted, HistoryChanged, TRANSCRIPT_WINDOW_BYTES, type RecognizedConversation } from "./conversation.ts";
+import type { ConversationPart, ConversationTurn } from "../shared/protocol.ts";
 import { toolSummary } from "./transcript-records.ts";
 
 describe("hermes paths", () => {
@@ -489,5 +490,115 @@ describe("hermesConversationPage SQLite integration", () => {
     const after = hermesConversationPage("s", dbPath);
     expect(after.history_id).not.toBe(before.history_id);
     expect(() => hermesConversationPage("s", dbPath, { from: before.cursor! })).toThrow(HistoryChanged);
+  });
+
+  it("contributes only preview allowance to normal reads and reports true stored output size", () => {
+    populate();
+    const db = new Database(dbPath);
+    const storedOutput = "a".repeat(50_000);
+    try {
+      db.query("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('s', 'assistant', ?, 1700000003)").run(
+        JSON.stringify([{ id: "tool-preview", function: { name: "bash", arguments: '{"command":"echo"}' } }]),
+      );
+      db.query("INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp) VALUES ('s', 'tool', ?, 'tool-preview', 'bash', 1700000004)")
+        .run(storedOutput);
+    } finally { db.close(); }
+    const newest = hermesConversationPage("s", dbPath);
+    const tool = newest.turns
+      .flatMap(turn => turn.parts)
+      .find((part): part is Extract<ConversationPart, { kind: "tool" }> => part.kind === "tool" && part.output_ref === "tool-preview");
+    expect(tool).toBeDefined();
+    expect(tool?.output_size).toBe(50_000);
+    expect(tool?.output).toBe(`${"a".repeat(4000)}\n… trimmed`);
+    expect(tool?.output.length).toBeLessThan(4100);
+    expect(hermesToolOutput("s", dbPath, "tool-preview", 2_000_000)).toBe(storedOutput);
+  });
+
+  it("clips a single oversized non-tool row and marks it trimmed while returning the row", () => {
+    const db = new Database(dbPath);
+    const hugeText = "X".repeat(17 * 1024 * 1024);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('huge', 'm', 1700000000)").run();
+      db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('huge', 'user', 'earlier prompt', 1700000001)").run();
+      db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('huge', 'user', ?, 1700000002)").run(hugeText);
+    } finally { db.close(); }
+    const newest = hermesConversationPage("huge", dbPath);
+    expect(newest.turns).toHaveLength(1);
+    const part = newest.turns[0]!.parts[0];
+    if (part?.kind !== "text") throw new Error("expected text part");
+    expect(part.text.endsWith("\n… trimmed")).toBe(true);
+    expect(Buffer.byteLength(part.text, "utf8")).toBeLessThanOrEqual(TRANSCRIPT_WINDOW_BYTES);
+    expect(newest.cursor).toBeTruthy();
+    const older = hermesConversationPage("huge", dbPath, { before: newest.cursor! });
+    expect(older.turns[0]!.parts[0]).toEqual({ kind: "text", text: "earlier prompt" });
+  });
+
+  it("stops newest, held, and historical pages at 16 MiB of selected text", () => {
+    const db = new Database(dbPath);
+    const fiveMb = "M".repeat(5 * 1024 * 1024);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('multi-mb', 'm', 1700000000)").run();
+      const insert = db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('multi-mb', 'user', ?, ?)");
+      db.transaction(() => {
+        for (let i = 1; i <= 5; i++) {
+          insert.run(`msg-${i}: ${fiveMb}`, 1700000000 + i);
+        }
+      })();
+    } finally { db.close(); }
+    const newest = hermesConversationPage("multi-mb", dbPath);
+    expect(newest.turns).toHaveLength(3);
+    const older = hermesConversationPage("multi-mb", dbPath, { before: newest.cursor! });
+    expect(older.turns).toHaveLength(2);
+    const allTexts = [...older.turns, ...newest.turns].map(t => {
+      const first = t.parts[0];
+      return first?.kind === "text" ? first.text.slice(0, 6) : "";
+    });
+    expect(allTexts).toEqual(["msg-1:", "msg-2:", "msg-3:", "msg-4:", "msg-5:"]);
+  });
+
+  it("keeps an exchange with 2000 tool calls and 50 kB results bounded by rows and bytes across historical walk", () => {
+    const db = new Database(dbPath);
+    const result50k = "r".repeat(50_000);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('big-ex', 'm', 1700000000)").run();
+      const insert = db.query("INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp) VALUES ('big-ex', ?, ?, ?, ?, ?, ?)");
+      db.transaction(() => {
+        insert.run("user", "Start big task", null, null, null, 1700000001);
+        for (let i = 1; i <= 2000; i++) {
+          const callId = `c-${i}`;
+          insert.run("assistant", null, null, JSON.stringify([{ id: callId, function: { name: "bash", arguments: "{}" } }]), null, 1700000001 + i * 2);
+          insert.run("tool", result50k, callId, null, "bash", 1700000002 + i * 2);
+        }
+      })();
+    } finally { db.close(); }
+
+    const pages: RecognizedConversation[] = [];
+    let page = hermesConversationPage("big-ex", dbPath);
+    pages.push(page);
+    while (page.cursor) {
+      page = hermesConversationPage("big-ex", dbPath, { before: page.cursor });
+      pages.push(page);
+    }
+
+    for (const p of pages) {
+      expect(p.turns.length).toBeLessThanOrEqual(100);
+      const totalTextBytes = p.turns
+        .flatMap((t: ConversationTurn) => t.parts)
+        .reduce((sum: number, part: ConversationPart) => {
+          if (part.kind === "text" || part.kind === "thinking") return sum + Buffer.byteLength(part.text, "utf8");
+          if (part.kind === "tool") return sum + Buffer.byteLength(part.output, "utf8") + Buffer.byteLength(part.input, "utf8");
+          return sum;
+        }, 0);
+      expect(totalTextBytes).toBeLessThanOrEqual(TRANSCRIPT_WINDOW_BYTES);
+    }
+
+    const visitedToolRefs = pages.flatMap(p =>
+      p.turns
+        .flatMap((t: ConversationTurn) => t.parts)
+        .filter((prt: ConversationPart): prt is Extract<ConversationPart, { kind: "tool" }> => prt.kind === "tool")
+        .map(prt => prt.output_ref),
+    );
+    expect(visitedToolRefs).toHaveLength(2000);
+    expect(new Set(visitedToolRefs).size).toBe(2000);
   });
 });

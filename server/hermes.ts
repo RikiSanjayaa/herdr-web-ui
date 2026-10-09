@@ -7,9 +7,9 @@ import { readFile, stat } from "node:fs/promises";
 
 import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPane } from "../shared/protocol.ts";
 import { herdrRpc } from "./herdr/client.ts";
-import { answerVersion, ConversationNotStarted, ConversationUnavailable, type ConversationPage, HistoryChanged, type RecognizedConversation } from "./conversation.ts";
+import { answerVersion, ConversationNotStarted, ConversationUnavailable, type ConversationPage, HistoryChanged, type RecognizedConversation, TRANSCRIPT_WINDOW_BYTES } from "./conversation.ts";
 import { toolSummary } from "./transcript-records.ts";
-import { trimOutput } from "./tool-output.ts";
+import { TOOL_OUTPUT_CHARS, trimOutput } from "./tool-output.ts";
 import { processStartedAt } from "./process-start.ts";
 
 export interface HermesMessageRow {
@@ -21,6 +21,18 @@ export interface HermesMessageRow {
   tool_name: string | null;
   reasoning: string | null;
   timestamp: number;
+  output_size?: number | null;
+  content_bytes?: number | null;
+}
+
+/** Clips non-tool row content that exceeds the byte budget and marks it trimmed. */
+function clipOversizedNonTool(content: string, maxBytes: number): string {
+  const suffix = "\n… trimmed";
+  const suffixBytes = Buffer.byteLength(suffix, "utf8");
+  const budget = Math.max(0, maxBytes - suffixBytes);
+  const buf = Buffer.from(content, "utf8");
+  if (buf.length <= maxBytes) return content;
+  return `${buf.subarray(0, budget).toString("utf8")}${suffix}`;
 }
 
 /** Uses HERMES_HOME when set, otherwise the user's .hermes directory. */
@@ -229,37 +241,134 @@ function toolGroupEnd(rows: readonly Pick<HermesMessageRow, "role" | "tool_call_
   }
 }
 
-/** Selects at most PAGE_SIZE active rows before a row cursor, returning them chronologically. */
+/** Selects at most PAGE_SIZE active rows and TRANSCRIPT_WINDOW_BYTES before a row cursor, returning them chronologically. */
 function hermesRowsBefore(db: Database, sessionId: string, before: number, floor: number): HermesMessageRow[] {
-  const boundary = db.query<Pick<HermesMessageRow, "id" | "role" | "tool_call_id" | "tool_calls">, [string, number, number]>(
-    `SELECT id, role, tool_call_id, tool_calls FROM messages
+  const boundary = db.query<Pick<HermesMessageRow, "id" | "role" | "tool_call_id" | "tool_calls"> & { text_bytes: number }, [number, string, number, number, number]>(
+    `SELECT id, role, tool_call_id, tool_calls,
+       COALESCE(
+         CASE
+           WHEN role = 'tool' THEN octet_length(substr(content, 1, ?))
+           ELSE octet_length(content)
+         END,
+         0
+       ) + COALESCE(octet_length(tool_calls), 0) + COALESCE(octet_length(reasoning), 0) + COALESCE(octet_length(role), 0) + COALESCE(octet_length(tool_name), 0) + COALESCE(octet_length(tool_call_id), 0) AS text_bytes
+     FROM messages
      WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
-     ORDER BY id DESC LIMIT ${PAGE_SIZE * 2}`,
-  ).all(sessionId, floor, before);
+     ORDER BY id DESC LIMIT ?`,
+  ).all(TOOL_OUTPUT_CHARS, sessionId, floor, before, PAGE_SIZE * 2);
   boundary.reverse();
-  let selected = Math.max(0, boundary.length - PAGE_SIZE);
+
+  let accumulatedBytes = 0;
+  let rowCount = 0;
+  let selected = boundary.length;
+  for (let i = boundary.length - 1; i >= 0; i--) {
+    const row = boundary[i]!;
+    const rowBytes = row.text_bytes;
+    if (rowCount === 0) {
+      selected = i;
+      rowCount = 1;
+      accumulatedBytes = Math.min(rowBytes, TRANSCRIPT_WINDOW_BYTES);
+      if (accumulatedBytes >= TRANSCRIPT_WINDOW_BYTES) break;
+    } else {
+      if (rowCount >= PAGE_SIZE || accumulatedBytes + rowBytes > TRANSCRIPT_WINDOW_BYTES) break;
+      selected = i;
+      rowCount++;
+      accumulatedBytes += rowBytes;
+    }
+  }
+
   for (let candidate = Math.max(0, selected - PAGE_SIZE); candidate < selected; candidate++) {
     const end = toolGroupEnd(boundary, candidate);
     if (end > selected && end < boundary.length && end - candidate <= PAGE_SIZE) {
-      selected = end;
-      break;
+      let groupBytes = 0;
+      for (let k = candidate; k < end; k++) groupBytes += boundary[k]!.text_bytes;
+      if (groupBytes <= TRANSCRIPT_WINDOW_BYTES) {
+        selected = end;
+        break;
+      }
     }
   }
+
   const start = boundary[selected]?.id ?? before;
-  return db.query<HermesMessageRow, [string, number, number]>(
-    `SELECT id, role, content, tool_call_id, tool_calls, tool_name, reasoning, timestamp
-     FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
-     ORDER BY id ASC LIMIT ${PAGE_SIZE}`,
-  ).all(sessionId, start, before);
+  const rows = db.query<HermesMessageRow, [number, number, string, number, number, number]>(
+    `SELECT id, role,
+       CASE WHEN role = 'tool' THEN substr(content, 1, ?) ELSE substr(content, 1, ?) END AS content,
+       tool_call_id, tool_calls, tool_name, reasoning, timestamp,
+       CASE WHEN role = 'tool' THEN length(content) ELSE NULL END AS output_size,
+       CASE WHEN role != 'tool' THEN octet_length(content) ELSE NULL END AS content_bytes
+     FROM messages
+     WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
+     ORDER BY id ASC LIMIT ?`,
+  ).all(TOOL_OUTPUT_CHARS, TRANSCRIPT_WINDOW_BYTES + 1, sessionId, start, before, PAGE_SIZE);
+
+  for (const row of rows) {
+    if (row.role !== "tool" && typeof row.content === "string") {
+      const bytes = row.content_bytes ?? Buffer.byteLength(row.content, "utf8");
+      if (bytes > TRANSCRIPT_WINDOW_BYTES) {
+        row.content = clipOversizedNonTool(row.content, TRANSCRIPT_WINDOW_BYTES);
+      }
+    }
+  }
+
+  return rows;
 }
 
-/** Reads forward from an already validated held row within the newest page. */
+/** Reads forward from an already validated held row within the newest page, bounded by rows and bytes. */
 function hermesRowsFrom(db: Database, sessionId: string, start: number): HermesMessageRow[] {
-  return db.query<HermesMessageRow, [string, number]>(
-    `SELECT id, role, content, tool_call_id, tool_calls, tool_name, reasoning, timestamp
-     FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ?
-     ORDER BY id ASC LIMIT ${PAGE_SIZE}`,
-  ).all(sessionId, start);
+  const boundary = db.query<Pick<HermesMessageRow, "id" | "role" | "tool_call_id" | "tool_calls"> & { text_bytes: number }, [number, string, number, number]>(
+    `SELECT id, role, tool_call_id, tool_calls,
+       COALESCE(
+         CASE
+           WHEN role = 'tool' THEN octet_length(substr(content, 1, ?))
+           ELSE octet_length(content)
+         END,
+         0
+       ) + COALESCE(octet_length(tool_calls), 0) + COALESCE(octet_length(reasoning), 0) + COALESCE(octet_length(role), 0) + COALESCE(octet_length(tool_name), 0) + COALESCE(octet_length(tool_call_id), 0) AS text_bytes
+     FROM messages
+     WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ?
+     ORDER BY id ASC LIMIT ?`,
+  ).all(TOOL_OUTPUT_CHARS, sessionId, start, PAGE_SIZE);
+
+  let accumulatedBytes = 0;
+  let endId: number | null = null;
+  let count = 0;
+  for (const row of boundary) {
+    if (count === 0) {
+      count = 1;
+      accumulatedBytes = Math.min(row.text_bytes, TRANSCRIPT_WINDOW_BYTES);
+      endId = row.id;
+      if (accumulatedBytes >= TRANSCRIPT_WINDOW_BYTES) break;
+    } else {
+      if (accumulatedBytes + row.text_bytes > TRANSCRIPT_WINDOW_BYTES) break;
+      count++;
+      accumulatedBytes += row.text_bytes;
+      endId = row.id;
+    }
+  }
+
+  if (endId === null) return [];
+
+  const rows = db.query<HermesMessageRow, [number, number, string, number, number, number]>(
+    `SELECT id, role,
+       CASE WHEN role = 'tool' THEN substr(content, 1, ?) ELSE substr(content, 1, ?) END AS content,
+       tool_call_id, tool_calls, tool_name, reasoning, timestamp,
+       CASE WHEN role = 'tool' THEN length(content) ELSE NULL END AS output_size,
+       CASE WHEN role != 'tool' THEN octet_length(content) ELSE NULL END AS content_bytes
+     FROM messages
+     WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id <= ?
+     ORDER BY id ASC LIMIT ?`,
+  ).all(TOOL_OUTPUT_CHARS, TRANSCRIPT_WINDOW_BYTES + 1, sessionId, start, endId, count);
+
+  for (const row of rows) {
+    if (row.role !== "tool" && typeof row.content === "string") {
+      const bytes = row.content_bytes ?? Buffer.byteLength(row.content, "utf8");
+      if (bytes > TRANSCRIPT_WINDOW_BYTES) {
+        row.content = clipOversizedNonTool(row.content, TRANSCRIPT_WINDOW_BYTES);
+      }
+    }
+  }
+
+  return rows;
 }
 
 /** Reads recorded reasoning settings without treating cumulative token usage as context. */
@@ -461,7 +570,7 @@ export function parseHermesRows(rows: readonly HermesMessageRow[]): Conversation
       const output = typeof row.content === "string" ? row.content : "";
 
       if (toolPart) {
-        trimOutput(toolPart, output, callId);
+        trimOutput(toolPart, output, callId, row.output_size ?? undefined);
         if (/^(?:error|failed|exception)\b/i.test(output.trim())) {
           toolPart.error = true;
         }
@@ -479,7 +588,7 @@ export function parseHermesRows(rows: readonly HermesMessageRow[]): Conversation
           input: "",
           output: "",
         };
-        trimOutput(orphan, output, callId);
+        trimOutput(orphan, output, callId, row.output_size ?? undefined);
         if (/^(?:error|failed|exception)\b/i.test(output.trim())) {
           orphan.error = true;
         }
