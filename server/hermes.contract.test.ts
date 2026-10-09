@@ -209,6 +209,27 @@ it("loads the whole output of a tool result cut in the conversation page", async
   expect(await response.text()).toBe(output);
 });
 
+it("falls back to scrollback when the Hermes database is corrupt or incompatible", async () => {
+  const corruptHome = join(root, "corrupt-home");
+  mkdirSync(corruptHome, { recursive: true });
+  writeFileSync(join(corruptHome, "state.db"), "not a sqlite database");
+  const corruptServer = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state-corrupt"), hermesHome: corruptHome });
+  try {
+    const query = new URLSearchParams({ pane_id: paneId });
+    const response = await fetch(`http://127.0.0.1:${corruptServer.port}/api/pane/conversation?${query}`);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { source: string; turns: unknown[] };
+    expect(body.source).toBe("scrollback");
+    expect(body.turns).toEqual([]);
+
+    const toolQuery = new URLSearchParams({ pane_id: paneId, ref: "any-tool" });
+    const toolResp = await fetch(`http://127.0.0.1:${corruptServer.port}/api/pane/conversation/tool-output?${toolQuery}`);
+    expect(toolResp.status).toBe(404);
+  } finally {
+    corruptServer.stop();
+  }
+});
+
 it.skipIf(process.platform !== "linux" && process.platform !== "darwin")("selects the pane process's store, prefers reports, validates breadcrumbs and falls back from an invalid process home", async () => {
   const profile = join(root, "process-profile");
   const fallback = process.env["HERMES_HOME"]!;

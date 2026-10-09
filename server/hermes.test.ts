@@ -17,7 +17,7 @@ import {
   processHermesHome,
   type HermesMessageRow,
 } from "./hermes.ts";
-import { ConversationNotStarted, HistoryChanged, TRANSCRIPT_WINDOW_BYTES, type RecognizedConversation } from "./conversation.ts";
+import { ConversationNotStarted, ConversationUnavailable, HistoryChanged, TRANSCRIPT_WINDOW_BYTES, type RecognizedConversation } from "./conversation.ts";
 import type { ConversationPart, ConversationTurn } from "../shared/protocol.ts";
 import { toolSummary } from "./transcript-records.ts";
 
@@ -600,5 +600,71 @@ describe("hermesConversationPage SQLite integration", () => {
     );
     expect(visitedToolRefs).toHaveLength(2000);
     expect(new Set(visitedToolRefs).size).toBe(2000);
+  });
+
+  it("converts database query, schema, and corruption errors into ConversationUnavailable", () => {
+    const corruptDb = join(tempDir, "corrupt.db");
+    writeFileSync(corruptDb, "not a sqlite database");
+    expect(() => hermesConversationPage("s", corruptDb)).toThrow(ConversationUnavailable);
+
+    const emptyDb = join(tempDir, "empty-schema.db");
+    const db = new Database(emptyDb);
+    db.exec("CREATE TABLE dummy (id INTEGER)");
+    db.close();
+    expect(() => hermesConversationPage("s", emptyDb)).toThrow(ConversationUnavailable);
+  });
+
+  it("returns null for tool output when database is corrupt or incompatible", () => {
+    const corruptDb = join(tempDir, "corrupt-tool.db");
+    writeFileSync(corruptDb, "invalid database");
+    expect(hermesToolOutput("s", corruptDb, "c1", 1000)).toBeNull();
+
+    const badSchema = join(tempDir, "bad-schema.db");
+    const db = new Database(badSchema);
+    db.exec("CREATE TABLE dummy (id INTEGER)");
+    db.close();
+    expect(hermesToolOutput("s", badSchema, "c1", 1000)).toBeNull();
+  });
+
+  it("isolates malformed tool arguments without dropping sibling calls", () => {
+    const db = new Database(dbPath);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('args-test', 'm', 1700000000)").run();
+      const calls = [
+        { id: "call-null", function: { name: "bash", arguments: null } },
+        { id: "call-array", function: { name: "bash", arguments: [1, 2, 3] } },
+        { id: "call-num", function: { name: "bash", arguments: 42 } },
+        { id: "call-valid", function: { name: "bash", arguments: JSON.stringify({ command: "echo ok" }) } },
+      ];
+      db.query("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('args-test', 'assistant', ?, 1700000001)")
+        .run(JSON.stringify(calls));
+    } finally { db.close(); }
+    const page = hermesConversationPage("args-test", dbPath);
+    expect(page.turns).toHaveLength(1);
+    const tools = page.turns[0]!.parts.filter((p): p is Extract<ConversationPart, { kind: "tool" }> => p.kind === "tool");
+    expect(tools).toHaveLength(4);
+    expect(tools.map(t => t.name)).toEqual(["bash", "bash", "bash", "bash"]);
+    expect(tools[0]!.input).toBe("null");
+    expect(tools[1]!.input).toBe("[1,2,3]");
+    expect(tools[2]!.input).toBe("42");
+    expect(tools[3]!.summary).toBe("echo ok");
+  });
+
+  it("handles malformed tool call items and treats invalid timestamps as unknown", () => {
+    const db = new Database(dbPath);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('bad-records', 'm', 1700000000)").run();
+      db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('bad-records', 'user', 'hi', ?)").run(1e25);
+      const mixedCalls = [null, "bad-item", 123, { id: "c-good", function: { name: "bash", arguments: '{"command":"ls"}' } }];
+      db.query("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('bad-records', 'assistant', ?, 1700000002)")
+        .run(JSON.stringify(mixedCalls));
+    } finally { db.close(); }
+    const page = hermesConversationPage("bad-records", dbPath);
+    expect(page.turns).toHaveLength(2);
+    expect(page.turns[0]!.ts).toBeNull();
+    expect(page.turns[0]!.parts).toEqual([{ kind: "text", text: "hi" }]);
+    const tools = page.turns[1]!.parts.filter((p): p is Extract<ConversationPart, { kind: "tool" }> => p.kind === "tool");
+    expect(tools).toHaveLength(1);
+    expect(tools[0]!.summary).toBe("ls");
   });
 });

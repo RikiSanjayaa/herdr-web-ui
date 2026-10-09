@@ -35,6 +35,40 @@ function clipOversizedNonTool(content: string, maxBytes: number): string {
   return `${buf.subarray(0, budget).toString("utf8")}${suffix}`;
 }
 
+/** Safely formats a unix timestamp in seconds as an ISO string, or null if invalid. */
+function parseTimestamp(ts: unknown): string | null {
+  if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0) return null;
+  try {
+    const d = new Date(ts * 1000);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+/** Safely extracts raw input string for display and a record object for summary generation. */
+function parseToolInput(rawArgs: unknown): { inputStr: string; inputObj: Record<string, unknown> } {
+  if (rawArgs === null) return { inputStr: "null", inputObj: {} };
+  if (rawArgs === undefined) return { inputStr: "", inputObj: {} };
+  if (typeof rawArgs === "string") {
+    let inputObj: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(rawArgs) as unknown;
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        inputObj = parsed as Record<string, unknown>;
+      }
+    } catch {}
+    return { inputStr: rawArgs, inputObj };
+  }
+  if (typeof rawArgs === "object") {
+    if (!Array.isArray(rawArgs)) {
+      return { inputStr: JSON.stringify(rawArgs), inputObj: rawArgs as Record<string, unknown> };
+    }
+    return { inputStr: JSON.stringify(rawArgs), inputObj: {} };
+  }
+  return { inputStr: String(rawArgs), inputObj: {} };
+}
+
 /** Uses HERMES_HOME when set, otherwise the user's .hermes directory. */
 export function defaultHermesHome(userHome?: string): string {
   return process.env["HERMES_HOME"] || join(userHome ?? process.env["HOME"] ?? "", ".hermes");
@@ -216,7 +250,11 @@ export function hermesToolOutput(sessionId: string, dbPath: string, ref: string,
        ORDER BY id DESC LIMIT 1`,
     ).get(maxChars, sessionId, ref);
     return row?.content?.slice(0, maxChars) ?? null;
-  } finally { db.close(); }
+  } catch {
+    return null;
+  } finally {
+    try { db.close(); } catch {}
+  }
 }
 
 /** End of an assistant call group and its contiguous results, or its starting index. */
@@ -496,8 +534,13 @@ export function hermesConversationPage(
         version,
       };
     })();
+  } catch (error) {
+    if (error instanceof HistoryChanged || error instanceof ConversationNotStarted || error instanceof ConversationUnavailable) {
+      throw error;
+    }
+    throw new ConversationUnavailable("transcript_missing");
   } finally {
-    db.close();
+    try { db.close(); } catch {}
   }
 }
 
@@ -507,94 +550,90 @@ export function parseHermesRows(rows: readonly HermesMessageRow[]): Conversation
   const pendingTools = new Map<string, Extract<ConversationPart, { kind: "tool" }>>();
 
   for (const row of rows) {
-    const ts = row.timestamp ? new Date(row.timestamp * 1000).toISOString() : null;
+    try {
+      const ts = parseTimestamp(row.timestamp);
 
-    if (row.role === "user") {
-      const text = typeof row.content === "string" ? row.content : "";
-      turns.push({
-        role: "user",
-        ts,
-        parts: [{ kind: "text", text }],
-      });
-    } else if (row.role === "assistant") {
-      let turn = turns[turns.length - 1];
-      if (!turn || turn.role !== "assistant") {
-        turn = { role: "assistant", ts, parts: [] };
-        turns.push(turn);
-      }
-      if (ts) turn.end_ts = ts;
-
-      if (typeof row.reasoning === "string" && row.reasoning.trim().length > 0) {
-        turn.parts.push({ kind: "thinking", text: row.reasoning.trim() });
-      }
-
-      if (row.tool_calls) {
-        try {
-          const parsed = JSON.parse(row.tool_calls);
-          if (Array.isArray(parsed)) {
-            for (const call of parsed) {
-              const callId = String(call.id ?? call.tool_call_id ?? "");
-              const fn = call.function ?? call;
-              const name = String(fn.name ?? call.name ?? "tool");
-              const rawArgs = fn.arguments ?? call.arguments ?? "{}";
-              let inputStr = "";
-              let inputObj: Record<string, unknown> = {};
-              if (typeof rawArgs === "string") {
-                inputStr = rawArgs;
-                try { inputObj = JSON.parse(rawArgs); } catch {}
-              } else if (typeof rawArgs === "object" && rawArgs !== null) {
-                inputObj = rawArgs as Record<string, unknown>;
-                inputStr = JSON.stringify(rawArgs);
-              }
-              const summary = toolSummary(name, inputObj);
-              const toolPart: Extract<ConversationPart, { kind: "tool" }> = {
-                kind: "tool",
-                name,
-                summary,
-                input: inputStr,
-                output: "",
-              };
-              turn.parts.push(toolPart);
-              if (callId) pendingTools.set(callId, toolPart);
-            }
-          }
-        } catch { /* malformed tool_calls json */ }
-      }
-
-      if (typeof row.content === "string" && row.content.trim().length > 0) {
-        turn.parts.push({ kind: "text", text: row.content });
-      }
-    } else if (row.role === "tool") {
-      const callId = row.tool_call_id ?? "";
-      const toolPart = pendingTools.get(callId);
-      const output = typeof row.content === "string" ? row.content : "";
-
-      if (toolPart) {
-        trimOutput(toolPart, output, callId, row.output_size ?? undefined);
-        if (/^(?:error|failed|exception)\b/i.test(output.trim())) {
-          toolPart.error = true;
-        }
-        pendingTools.delete(callId);
-      } else {
+      if (row.role === "user") {
+        const text = typeof row.content === "string" ? row.content : "";
+        turns.push({
+          role: "user",
+          ts,
+          parts: [{ kind: "text", text }],
+        });
+      } else if (row.role === "assistant") {
         let turn = turns[turns.length - 1];
         if (!turn || turn.role !== "assistant") {
           turn = { role: "assistant", ts, parts: [] };
           turns.push(turn);
         }
-        const orphan: Extract<ConversationPart, { kind: "tool" }> = {
-          kind: "tool",
-          name: row.tool_name ?? "tool",
-          summary: row.tool_name ?? "tool",
-          input: "",
-          output: "",
-        };
-        trimOutput(orphan, output, callId, row.output_size ?? undefined);
-        if (/^(?:error|failed|exception)\b/i.test(output.trim())) {
-          orphan.error = true;
+        if (ts) turn.end_ts = ts;
+
+        if (typeof row.reasoning === "string" && row.reasoning.trim().length > 0) {
+          turn.parts.push({ kind: "thinking", text: row.reasoning.trim() });
         }
-        turn.parts.push(orphan);
+
+        if (row.tool_calls) {
+          try {
+            const parsed = JSON.parse(row.tool_calls) as unknown;
+            if (Array.isArray(parsed)) {
+              for (const item of parsed) {
+                if (typeof item !== "object" || item === null) continue;
+                const call = item as Record<string, unknown>;
+                const callId = String(call.id ?? call.tool_call_id ?? "");
+                const fn = (typeof call.function === "object" && call.function !== null ? call.function : call) as Record<string, unknown>;
+                const name = String(fn.name ?? call.name ?? "tool");
+                const rawArgs = "arguments" in fn ? fn.arguments : "arguments" in call ? call.arguments : "{}";
+                const { inputStr, inputObj } = parseToolInput(rawArgs);
+                const summary = toolSummary(name, inputObj);
+                const toolPart: Extract<ConversationPart, { kind: "tool" }> = {
+                  kind: "tool",
+                  name,
+                  summary,
+                  input: inputStr,
+                  output: "",
+                };
+                turn.parts.push(toolPart);
+                if (callId) pendingTools.set(callId, toolPart);
+              }
+            }
+          } catch { /* malformed tool_calls json */ }
+        }
+
+        if (typeof row.content === "string" && row.content.trim().length > 0) {
+          turn.parts.push({ kind: "text", text: row.content });
+        }
+      } else if (row.role === "tool") {
+        const callId = row.tool_call_id ?? "";
+        const toolPart = pendingTools.get(callId);
+        const output = typeof row.content === "string" ? row.content : "";
+
+        if (toolPart) {
+          trimOutput(toolPart, output, callId, row.output_size ?? undefined);
+          if (/^(?:error|failed|exception)\b/i.test(output.trim())) {
+            toolPart.error = true;
+          }
+          pendingTools.delete(callId);
+        } else {
+          let turn = turns[turns.length - 1];
+          if (!turn || turn.role !== "assistant") {
+            turn = { role: "assistant", ts, parts: [] };
+            turns.push(turn);
+          }
+          const orphan: Extract<ConversationPart, { kind: "tool" }> = {
+            kind: "tool",
+            name: row.tool_name ?? "tool",
+            summary: row.tool_name ?? "tool",
+            input: "",
+            output: "",
+          };
+          trimOutput(orphan, output, callId, row.output_size ?? undefined);
+          if (/^(?:error|failed|exception)\b/i.test(output.trim())) {
+            orphan.error = true;
+          }
+          turn.parts.push(orphan);
+        }
       }
-    }
+    } catch { /* ignore individual malformed row */ }
   }
 
   return turns;
