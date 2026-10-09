@@ -50,15 +50,25 @@ describe("hermes terminal breadcrumb resolution", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("reads breadcrumb when cwd matches", () => {
+  it.skipIf(process.platform === "win32")("accepts only a current-process breadcrumb for the canonical cwd", () => {
     const sessionsDir = join(tempDir, "terminal-sessions");
+    const project = join(tempDir, "project");
+    const alias = join(tempDir, "project-link");
     mkdirSync(sessionsDir, { recursive: true });
+    mkdirSync(project);
+    symlinkSync(project, alias, "dir");
     const crumbFile = join(sessionsDir, "tty-dev-pts-9");
-    writeFileSync(crumbFile, JSON.stringify({ session_id: "20261008_120000_abc123", cwd: "/home/riki/project", ts: 1791449000 }));
+    const startedAt = 1_791_449_000_000;
+    writeFileSync(crumbFile, JSON.stringify({ session_id: "20261008_120000_abc123", cwd: project, ts: startedAt / 1000 }));
 
-    expect(hermesBreadcrumbSession(tempDir, "tty-dev-pts-9", "/home/riki/project")).toBe("20261008_120000_abc123");
-    expect(hermesBreadcrumbSession(tempDir, "tty-dev-pts-9", "/other/dir")).toBeNull();
-    expect(hermesBreadcrumbSession(tempDir, "tty-dev-pts-8", "/home/riki/project")).toBeNull();
+    expect(hermesBreadcrumbSession(tempDir, "tty-dev-pts-9", alias, startedAt)).toBe("20261008_120000_abc123");
+    expect(hermesBreadcrumbSession(tempDir, "tty-dev-pts-9", tempDir, startedAt)).toBeNull();
+    expect(hermesBreadcrumbSession(tempDir, "tty-dev-pts-8", alias, startedAt)).toBeNull();
+
+    writeFileSync(crumbFile, JSON.stringify({ session_id: "stale", cwd: project, ts: startedAt / 1000 - 2 }));
+    expect(hermesBreadcrumbSession(tempDir, "tty-dev-pts-9", alias, startedAt)).toBeNull();
+    writeFileSync(crumbFile, JSON.stringify({ session_id: "missing-time", cwd: project }));
+    expect(hermesBreadcrumbSession(tempDir, "tty-dev-pts-9", alias, startedAt)).toBeNull();
   });
 });
 
@@ -245,23 +255,35 @@ describe("hermesConversationPage SQLite integration", () => {
     expect(result.cursor).toBeNull();
   });
 
-  it("supports pagination with before cursor", () => {
+  it("pages one long exchange by active rows without gaps or overlap", () => {
     const db = new Database(dbPath);
-    db.query("INSERT INTO sessions (id, model, started_at) VALUES (?, ?, ?)").run("s_page", "m", 1700000000);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES (?, ?, ?)").run("s_page", "m", 1700000000);
+      const insert = db.query("INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      db.transaction(() => {
+        insert.run("s_page", "user", "Start", null, null, null, 1700000001);
+        for (let index = 1; index <= 200; index++) {
+          insert.run("s_page", "assistant", null, null, JSON.stringify([
+            { id: `call-${index}`, function: { name: "bash", arguments: JSON.stringify({ command: `echo ${index}` }) } },
+          ]), null, 1700000000 + index * 2);
+          insert.run("s_page", "tool", `result-${index}`, `call-${index}`, null, "bash", 1700000001 + index * 2);
+        }
+      })();
+    } finally { db.close(); }
 
-    for (let i = 1; i <= 150; i++) {
-      db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)")
-        .run("s_page", i % 2 === 1 ? "user" : "assistant", `Message ${i}`, 1700000000 + i);
+    const pages = [];
+    let page = hermesConversationPage("s_page", dbPath);
+    pages.push(page);
+    while (page.cursor !== null) {
+      page = hermesConversationPage("s_page", dbPath, { before: page.cursor });
+      pages.push(page);
     }
-    db.close();
-
-    const newestPage = hermesConversationPage("s_page", dbPath);
-    expect(newestPage.turns.length).toBe(100);
-    expect(newestPage.cursor).toBe(`${newestPage.history_id}:51`);
-
-    const olderPage = hermesConversationPage("s_page", dbPath, { before: newestPage.cursor! });
-    expect(olderPage.turns.length).toBe(50);
-    expect(olderPage.cursor).toBeNull();
+    pages.reverse();
+    expect(pages.map(item => item.turns.flatMap(turn => turn.parts).filter(part => part.kind === "tool").length))
+      .toEqual([0, 50, 50, 50, 50]);
+    expect(pages.flatMap(item => item.turns).flatMap(turn => turn.parts).map(part =>
+      part.kind === "text" ? part.text : part.kind === "tool" ? `${part.summary}:${part.output}` : part.kind))
+      .toEqual(["Start", ...Array.from({ length: 200 }, (_, index) => `echo ${index + 1}:result-${index + 1}`)]);
   });
 
   it("throws HistoryChanged on invalid cursor", () => {
@@ -279,7 +301,9 @@ describe("hermesConversationPage SQLite integration", () => {
     try {
       db.query("INSERT INTO sessions (id, model, started_at) VALUES ('s', 'old-model', 1700000000)").run();
       const insert = db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s', ?, ?, ?)");
-      for (let id = 1; id <= count; id++) insert.run(id % 2 ? "user" : "assistant", `Message ${id}`, 1700000000 + id);
+      db.transaction(() => {
+        for (let id = 1; id <= count; id++) insert.run(id % 2 ? "user" : "assistant", `Message ${id}`, 1700000000 + id);
+      })();
     } finally { db.close(); }
   };
 
@@ -299,7 +323,9 @@ describe("hermesConversationPage SQLite integration", () => {
     const db = new Database(dbPath);
     try {
       const insert = db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s', ?, ?, ?)");
-      for (let id = 151; id <= 350; id++) insert.run(id % 2 ? "user" : "assistant", `Message ${id}`, 1700000000 + id);
+      db.transaction(() => {
+        for (let id = 151; id <= 350; id++) insert.run(id % 2 ? "user" : "assistant", `Message ${id}`, 1700000000 + id);
+      })();
     } finally { db.close(); }
     const newest = hermesConversationPage("s", dbPath, { from: initial.cursor! });
     expect(newest.turns[0]!.parts).toEqual([{ kind: "text", text: "Message 251" }]);
@@ -310,34 +336,70 @@ describe("hermesConversationPage SQLite integration", () => {
     expect([...first.turns, ...between.turns, ...newest.turns].flatMap(turn => turn.parts).map(part => part.kind === "text" ? part.text : ""))
       .toEqual(Array.from({ length: 300 }, (_, index) => `Message ${index + 51}`));
   });
-
-  it("refuses foreign, missing and reversed cursor positions", () => {
+  it("accepts every active row cursor and refuses foreign, missing, inactive and reversed positions", () => {
     populate();
     const newest = hermesConversationPage("s", dbPath);
     const prefix = `${newest.history_id}:`;
+    expect(hermesConversationPage("s", dbPath, { from: `${prefix}52` }).cursor).toBe(`${prefix}52`);
+    expect(hermesConversationPage("s", dbPath, { before: `${prefix}52` }).turns.at(-1)!.parts)
+      .toEqual([{ kind: "text", text: "Message 51" }]);
+    const db = new Database(dbPath);
+    try { db.query("UPDATE messages SET active = 0, compacted = 0 WHERE id = 52").run(); }
+    finally { db.close(); }
     for (const page of [
       { before: newest.cursor!, since: "hermes:another-session:1" },
       { from: `${prefix}-1` },
       { from: `${prefix}9999` },
+      { from: `${prefix}52` },
       { before: newest.cursor!, since: `${prefix}101` },
       { before: newest.cursor!, since: `${prefix}not-a-number` },
     ]) expect(() => hermesConversationPage("s", dbPath, page)).toThrow(HistoryChanged);
   });
 
-  it("keeps a tool call and its result together at a page boundary", () => {
+  it("keeps adjacent tool calls and results together at a page boundary", () => {
     populate();
     const db = new Database(dbPath);
     try {
-      db.query("UPDATE messages SET content = NULL, tool_calls = ? WHERE id = 50").run(JSON.stringify([
-        { id: "boundary-call", function: { name: "bash", arguments: '{"command":"echo example"}' } },
+      db.query("UPDATE messages SET role = 'assistant', content = NULL, tool_calls = ? WHERE id = 49").run(JSON.stringify([
+        { id: "boundary-a", function: { name: "bash", arguments: '{"command":"echo a"}' } },
+        { id: "boundary-b", function: { name: "bash", arguments: '{"command":"echo b"}' } },
       ]));
-      db.query("UPDATE messages SET role = 'tool', content = 'example', tool_call_id = 'boundary-call', tool_name = 'bash' WHERE id = 51").run();
+      db.query("UPDATE messages SET role = 'tool', content = 'a', tool_call_id = 'boundary-a', tool_name = 'bash' WHERE id = 50").run();
+      db.query("UPDATE messages SET role = 'tool', content = 'b', tool_call_id = 'boundary-b', tool_name = 'bash' WHERE id = 51").run();
     } finally { db.close(); }
     const newest = hermesConversationPage("s", dbPath);
     const older = hermesConversationPage("s", dbPath, { before: newest.cursor! });
-    const tools = [...older.turns, ...newest.turns].flatMap(turn => turn.parts).filter(part => part.kind === "tool");
-    expect(tools).toHaveLength(1);
-    expect(tools[0]).toMatchObject({ name: "bash", summary: "echo example", output: "example" });
+    expect(newest.turns.flatMap(turn => turn.parts).filter(part => part.kind === "tool")).toHaveLength(0);
+    expect(newest.turns).toHaveLength(98);
+    const tools = older.turns.flatMap(turn => turn.parts).filter(part => part.kind === "tool");
+    expect(tools).toHaveLength(2);
+    expect(tools.map(tool => ({ summary: tool.summary, output: tool.output }))).toEqual([
+      { summary: "echo a", output: "a" },
+      { summary: "echo b", output: "b" },
+    ]);
+  });
+
+  it("splits a tool group that cannot fit without widening the page", () => {
+    const db = new Database(dbPath);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('wide', 'm', 1700000000)").run();
+      const insert = db.query("INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp) VALUES ('wide', ?, ?, ?, ?, ?, ?)");
+      const calls = Array.from({ length: 100 }, (_, index) => ({
+        id: `wide-${index + 1}`,
+        function: { name: "bash", arguments: JSON.stringify({ command: `echo ${index + 1}` }) },
+      }));
+      db.transaction(() => {
+        insert.run("user", "Start", null, null, null, 1700000001);
+        insert.run("assistant", null, null, JSON.stringify(calls), null, 1700000002);
+        for (let index = 1; index <= 100; index++) {
+          insert.run("tool", `result-${index}`, `wide-${index}`, null, "bash", 1700000002 + index);
+        }
+      })();
+    } finally { db.close(); }
+    const newest = hermesConversationPage("wide", dbPath);
+    expect(newest.turns.flatMap(turn => turn.parts).filter(part => part.kind === "tool")).toHaveLength(100);
+    const older = hermesConversationPage("wide", dbPath, { before: newest.cursor! });
+    expect(older.turns.flatMap(turn => turn.parts).filter(part => part.kind === "tool")).toHaveLength(100);
   });
 
   it("refreshes metadata and edited messages while a WAL writer stays open", () => {

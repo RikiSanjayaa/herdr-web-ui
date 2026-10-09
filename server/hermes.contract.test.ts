@@ -110,20 +110,36 @@ it("answers empty conversation before messages are written, then follows the sql
   expect(written.turns[1]!.role).toBe("assistant");
 });
 
-it("keeps a held page inclusive and rejects a cursor from another history over HTTP", async () => {
+it("advances a held read to a bounded newest page and fills every intervening row", async () => {
   const db = new Database(dbPath);
   try {
     db.query("DELETE FROM messages WHERE session_id = ?").run(sessionId);
     const insert = db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)");
-    for (let index = 1; index <= 150; index++) insert.run(sessionId, index % 2 ? "user" : "assistant", `Message ${index}`, 1700000000 + index);
+    db.transaction(() => {
+      for (let index = 1; index <= 150; index++) insert.run(sessionId, index % 2 ? "user" : "assistant", `Message ${index}`, 1700000000 + index);
+    })();
   } finally { db.close(); }
-  const newest = await read();
+  const held = await read();
+  expect(held.turns).toHaveLength(100);
+
+  const writer = new Database(dbPath);
+  try {
+    const insert = writer.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)");
+    writer.transaction(() => {
+      for (let index = 151; index <= 350; index++) insert.run(sessionId, index % 2 ? "user" : "assistant", `Message ${index}`, 1700000000 + index);
+    })();
+  } finally { writer.close(); }
+
+  const newest = await read({ from: held.cursor! });
   expect(newest.turns).toHaveLength(100);
-  const older = await read({ before: newest.cursor! });
-  expect(older.turns).toHaveLength(50);
-  const polled = await read({ from: newest.cursor! });
-  expect(polled.cursor).toBe(newest.cursor);
-  expect(polled.turns).toEqual(newest.turns);
+  expect(newest.turns[0]!.parts).toEqual([{ kind: "text", text: "Message 251" }]);
+  expect(newest.turns.at(-1)!.parts).toEqual([{ kind: "text", text: "Message 350" }]);
+  const middle = await read({ before: newest.cursor!, since: held.cursor! });
+  const oldest = await read({ before: middle.cursor!, since: held.cursor! });
+  expect(oldest.cursor).toBe(held.cursor);
+  expect([...oldest.turns, ...middle.turns, ...newest.turns].flatMap(turn => turn.parts).map(part => part.kind === "text" ? part.text : ""))
+    .toEqual(Array.from({ length: 300 }, (_, index) => `Message ${index + 51}`));
+
   const query = new URLSearchParams({ pane_id: paneId, before: newest.cursor!, since: "hermes:another-session:1" });
   const invalid = await fetch(`http://127.0.0.1:${server.port}/api/pane/conversation?${query}`);
   expect(invalid.status).toBe(409);

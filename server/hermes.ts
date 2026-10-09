@@ -158,20 +158,59 @@ export function hermesToolOutput(sessionId: string, dbPath: string, ref: string,
   } finally { db.close(); }
 }
 
-/** Widens a bounded row window to the user message that starts its exchange. */
-function hermesPageStart(db: Database, sessionId: string, before: number, floor: number): number {
-  const window = db.query<{ id: number }, [string, number, number]>(
-    `SELECT id FROM messages
-     WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id < ? AND id >= ?
-     ORDER BY id DESC LIMIT ${PAGE_SIZE}`,
-  ).all(sessionId, before, floor);
-  const first = window.at(-1);
-  if (!first) return before;
-  const user = db.query<{ id: number | null }, [string, number, number]>(
-    `SELECT MAX(id) AS id FROM messages
-     WHERE session_id = ? AND (active = 1 OR compacted = 1) AND role = 'user' AND id <= ? AND id >= ?`,
-  ).get(sessionId, first.id, floor);
-  return user?.id ?? floor;
+/** End of an assistant call group and its contiguous results, or its starting index. */
+function toolGroupEnd(rows: readonly Pick<HermesMessageRow, "role" | "tool_call_id" | "tool_calls">[], start: number): number {
+  const call = rows[start];
+  if (call?.role !== "assistant" || !call.tool_calls) return start;
+  try {
+    const parsed = JSON.parse(call.tool_calls) as unknown;
+    if (!Array.isArray(parsed)) return start;
+    const callIds = new Set<string>();
+    for (const item of parsed) {
+      if (typeof item !== "object" || item === null) continue;
+      const value = item as { id?: unknown; tool_call_id?: unknown };
+      const id = String(value.id ?? value.tool_call_id ?? "");
+      if (id) callIds.add(id);
+    }
+    let end = start + 1;
+    while (end < rows.length && rows[end]!.role === "tool" && callIds.has(rows[end]!.tool_call_id ?? "")) end++;
+    return end > start + 1 ? end : start;
+  } catch {
+    return start;
+  }
+}
+
+/** Selects at most PAGE_SIZE active rows before a row cursor, returning them chronologically. */
+function hermesRowsBefore(db: Database, sessionId: string, before: number, floor: number): HermesMessageRow[] {
+  const boundary = db.query<Pick<HermesMessageRow, "id" | "role" | "tool_call_id" | "tool_calls">, [string, number, number]>(
+    `SELECT id, role, tool_call_id, tool_calls FROM messages
+     WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
+     ORDER BY id DESC LIMIT ${PAGE_SIZE * 2}`,
+  ).all(sessionId, floor, before);
+  boundary.reverse();
+  let selected = Math.max(0, boundary.length - PAGE_SIZE);
+  for (let candidate = Math.max(0, selected - PAGE_SIZE); candidate < selected; candidate++) {
+    const end = toolGroupEnd(boundary, candidate);
+    if (end > selected && end < boundary.length && end - candidate <= PAGE_SIZE) {
+      selected = end;
+      break;
+    }
+  }
+  const start = boundary[selected]?.id ?? before;
+  return db.query<HermesMessageRow, [string, number, number]>(
+    `SELECT id, role, content, tool_call_id, tool_calls, tool_name, reasoning, timestamp
+     FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
+     ORDER BY id ASC LIMIT ${PAGE_SIZE}`,
+  ).all(sessionId, start, before);
+}
+
+/** Reads forward from an already validated held row within the newest page. */
+function hermesRowsFrom(db: Database, sessionId: string, start: number): HermesMessageRow[] {
+  return db.query<HermesMessageRow, [string, number]>(
+    `SELECT id, role, content, tool_call_id, tool_calls, tool_name, reasoning, timestamp
+     FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ?
+     ORDER BY id ASC LIMIT ${PAGE_SIZE}`,
+  ).all(sessionId, start);
 }
 
 /** Reads recorded reasoning settings without treating cumulative token usage as context. */
@@ -195,10 +234,10 @@ function hermesMetadata(session: { model?: string | null; model_config?: string 
 }
 
 /**
- * Reads a consistent SQLite snapshot with whole exchanges at page boundaries.
- * Held pages include their starting row; a held start outside the newest window
- * advances to that window, with before/since pages covering the gap.
- * Page contents name the cache version so WAL edits invalidate unchanged row counts.
+ * Reads a consistent SQLite snapshot in pages of at most PAGE_SIZE active rows.
+ * Held pages include their starting row while it remains in the newest page; once
+ * it falls behind, before/since pages cover the gap. Page contents name the cache
+ * version so WAL edits invalidate unchanged row counts.
  */
 export function hermesConversationPage(
   sessionId: string,
@@ -245,39 +284,39 @@ export function hermesConversationPage(
         : `${dbPath}\0${historyId}\0from:${page.from ?? ""}`;
       const prefix = `${historyId}:`;
 
-      /** Accepts only an exchange boundary still present in this database generation. */
+      /** Accepts any active row still present in this database generation. */
       const parseCursor = (cursor: string): number => {
         if (!cursor.startsWith(prefix)) throw new HistoryChanged();
         const value = cursor.slice(prefix.length);
         const id = Number(value);
         if (!/^\d+$/.test(value) || !Number.isSafeInteger(id) || id < firstRow.id) throw new HistoryChanged();
-        const row = db.query<{ role: string }, [string, number]>(
-          "SELECT role FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id = ?",
+        const row = db.query<{ id: number }, [string, number]>(
+          "SELECT id FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id = ?",
         ).get(sessionId, id);
-        if (!row || (id !== firstRow.id && row.role !== "user")) throw new HistoryChanged();
+        if (!row) throw new HistoryChanged();
         return id;
       };
 
+      let rows: HermesMessageRow[];
       let start: number;
-      let before: number;
       if (page.before !== undefined) {
-        before = parseCursor(page.before);
+        const before = parseCursor(page.before);
         const floor = page.since === undefined ? firstRow.id : parseCursor(page.since);
         if (floor > before) throw new HistoryChanged();
-        start = hermesPageStart(db, sessionId, before, floor);
+        rows = hermesRowsBefore(db, sessionId, before, floor);
+        start = rows[0]?.id ?? floor;
       } else {
         if (page.since !== undefined) throw new HistoryChanged();
-        before = Number.MAX_SAFE_INTEGER;
-        const newest = hermesPageStart(db, sessionId, before, firstRow.id);
+        const newest = hermesRowsBefore(db, sessionId, Number.MAX_SAFE_INTEGER, firstRow.id);
         const held = page.from === undefined ? null : parseCursor(page.from);
-        start = held === null ? newest : Math.max(held, newest);
+        if (held !== null && held >= newest[0]!.id) {
+          rows = hermesRowsFrom(db, sessionId, held);
+          start = held;
+        } else {
+          rows = newest;
+          start = newest[0]!.id;
+        }
       }
-
-      const rows = db.query<HermesMessageRow, [string, number, number]>(
-        `SELECT id, role, content, tool_call_id, tool_calls, tool_name, reasoning, timestamp
-         FROM messages WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
-         ORDER BY id ASC`,
-      ).all(sessionId, start, before);
       const cursor = start > firstRow.id ? `${prefix}${start}` : null;
       const metadata = hermesMetadata(sessionRow);
       const signature = createHash("sha256").update(JSON.stringify([rows, metadata, cursor])).digest("base64url");
