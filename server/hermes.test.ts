@@ -582,6 +582,24 @@ describe("hermesConversationPage SQLite integration", () => {
     expect(older.turns[0]!.parts[0]).toEqual({ kind: "text", text: "earlier prompt" });
   });
 
+  it("bounds oversized reasoning and tool-call arguments before reading the row", () => {
+    const db = new Database(dbPath);
+    try {
+      db.query("INSERT INTO sessions (id, model, started_at) VALUES ('large-fields', 'm', 1700000000)").run();
+      db.query("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('large-fields', 'user', 'prompt', 1700000001)").run();
+      db.query("INSERT INTO messages (session_id, role, content, reasoning, tool_calls, timestamp) VALUES ('large-fields', 'assistant', 'answer', ?, ?, 1700000002)")
+        .run("r".repeat(TRANSCRIPT_WINDOW_BYTES + 1), JSON.stringify([{ id: "large-call", function: { name: "bash", arguments: "x".repeat(4 * 1024 * 1024) } }]));
+    } finally { db.close(); }
+
+    const newest = hermesConversationPage("large-fields", dbPath);
+    expect(newest.turns).toHaveLength(1);
+    const thinking = newest.turns[0]!.parts.find((part) => part.kind === "thinking");
+    expect(thinking?.kind === "thinking" ? thinking.text.endsWith("\n… trimmed") : false).toBe(true);
+    expect(thinking?.kind === "thinking" ? Buffer.byteLength(thinking.text, "utf8") : 0).toBeLessThanOrEqual(TRANSCRIPT_WINDOW_BYTES);
+    expect(newest.turns[0]!.parts.some((part) => part.kind === "tool")).toBe(false);
+    expect(hermesConversationPage("large-fields", dbPath, { from: newest.cursor! }).turns[0]!.parts).toEqual(newest.turns[0]!.parts);
+  });
+
   it("stops newest, held, and historical pages at 16 MiB of selected text", () => {
     const db = new Database(dbPath);
     const fiveMb = "M".repeat(5 * 1024 * 1024);

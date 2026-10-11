@@ -83,7 +83,7 @@ export function TelemetryControls() {
     changeTelemetry({ enabled }).then(setStatus, (failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure))).finally(() => setSaving(false));
   };
   return (
-    <SettingsGroup title={t("Anonymous usage counts")} className="settings-telemetry">
+    <SettingsGroup title={t("Anonymous usage counts")} className="settings-telemetry" section="telemetry">
       {status.blocked_by_env
         ? <p className="settings-item settings-hint">{t("Turned off on this PC by HERDR_WEB_TELEMETRY=0, DO_NOT_TRACK or a CI environment.")}</p>
         : <SettingsRow label={t("Send install and update counts")} description={t("Once when the app is installed and once per update. The receiver notes the country a message came from but stores no IP address, and nothing about your terminals, agents or files is sent.")}>

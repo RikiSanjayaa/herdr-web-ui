@@ -23,6 +23,7 @@ export interface HermesMessageRow {
   timestamp: number;
   output_size?: number | null;
   content_bytes?: number | null;
+  reasoning_chars?: number | null;
 }
 
 /** Clips non-tool row content that exceeds the byte budget and marks it trimmed. */
@@ -237,6 +238,11 @@ export function forgetHermesTranscriptState(path?: string): void {
 }
 
 const PAGE_SIZE = 100;
+const BOUNDARY_TOOL_CALLS_BYTES = 64 * 1024;
+const PAGE_TOOL_CALLS_BYTES = 4 * 1024 * 1024;
+function reasoningChars(): number {
+  return Math.floor((TRANSCRIPT_WINDOW_BYTES - Buffer.byteLength("\n… trimmed", "utf8")) / 4);
+}
 
 /** Computes the 16-character generation identity for a Hermes session in a database. */
 export function hermesTranscriptIdentity(dbPath: string, startedAt: number | string = ""): string | null {
@@ -353,8 +359,9 @@ function toolGroupEnd(rows: readonly Pick<HermesMessageRow, "role" | "tool_call_
 
 /** Selects at most PAGE_SIZE active rows and TRANSCRIPT_WINDOW_BYTES before a row cursor, returning them chronologically. */
 function hermesRowsBefore(db: Database, sessionId: string, before: number, floor: number): HermesMessageRow[] {
-  const boundary = db.query<Pick<HermesMessageRow, "id" | "role" | "tool_call_id" | "tool_calls"> & { text_bytes: number }, [number, string, number, number, number]>(
-    `SELECT id, role, tool_call_id, tool_calls,
+  const boundary = db.query<Pick<HermesMessageRow, "id" | "role" | "tool_call_id" | "tool_calls"> & { text_bytes: number }, [number, number, string, number, number, number]>(
+    `SELECT id, role, tool_call_id,
+       CASE WHEN length(CAST(tool_calls AS BLOB)) <= ? THEN tool_calls ELSE NULL END AS tool_calls,
        COALESCE(
          CASE
            WHEN role = 'tool' THEN length(CAST(substr(content, 1, ?) AS BLOB))
@@ -365,7 +372,7 @@ function hermesRowsBefore(db: Database, sessionId: string, before: number, floor
      FROM messages
      WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
      ORDER BY id DESC LIMIT ?`,
-  ).all(TOOL_OUTPUT_CHARS, sessionId, floor, before, PAGE_SIZE * 2);
+  ).all(BOUNDARY_TOOL_CALLS_BYTES, TOOL_OUTPUT_CHARS, sessionId, floor, before, PAGE_SIZE * 2);
   boundary.reverse();
 
   let accumulatedBytes = 0;
@@ -400,16 +407,17 @@ function hermesRowsBefore(db: Database, sessionId: string, before: number, floor
   }
 
   const start = boundary[selected]?.id ?? before;
-  const rows = db.query<HermesMessageRow, [number, number, string, number, number, number]>(
+  const rows = db.query<HermesMessageRow, [number, number, number, number, string, number, number, number]>(
     `SELECT id, role,
        CASE WHEN role = 'tool' THEN substr(content, 1, ?) ELSE substr(content, 1, ?) END AS content,
-       tool_call_id, tool_calls, tool_name, reasoning, timestamp,
+       tool_call_id, CASE WHEN length(CAST(tool_calls AS BLOB)) <= ? THEN tool_calls ELSE NULL END AS tool_calls,
+       tool_name, substr(reasoning, 1, ?) AS reasoning, length(reasoning) AS reasoning_chars, timestamp,
        CASE WHEN role = 'tool' THEN length(content) ELSE NULL END AS output_size,
        CASE WHEN role != 'tool' THEN length(CAST(content AS BLOB)) ELSE NULL END AS content_bytes
      FROM messages
      WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id < ?
      ORDER BY id ASC LIMIT ?`,
-  ).all(TOOL_OUTPUT_CHARS, TRANSCRIPT_WINDOW_BYTES + 1, sessionId, start, before, PAGE_SIZE);
+  ).all(TOOL_OUTPUT_CHARS, TRANSCRIPT_WINDOW_BYTES + 1, PAGE_TOOL_CALLS_BYTES, reasoningChars(), sessionId, start, before, PAGE_SIZE);
 
   for (const row of rows) {
     if (row.role !== "tool" && typeof row.content === "string") {
@@ -418,6 +426,7 @@ function hermesRowsBefore(db: Database, sessionId: string, before: number, floor
         row.content = clipOversizedNonTool(row.content, TRANSCRIPT_WINDOW_BYTES);
       }
     }
+    if (typeof row.reasoning === "string" && (row.reasoning_chars ?? 0) > reasoningChars()) row.reasoning += "\n… trimmed";
   }
 
   return rows;
@@ -426,7 +435,7 @@ function hermesRowsBefore(db: Database, sessionId: string, before: number, floor
 /** Reads forward from an already validated held row within the newest page, bounded by rows and bytes. */
 function hermesRowsFrom(db: Database, sessionId: string, start: number): HermesMessageRow[] {
   const boundary = db.query<Pick<HermesMessageRow, "id" | "role" | "tool_call_id" | "tool_calls"> & { text_bytes: number }, [number, string, number, number]>(
-    `SELECT id, role, tool_call_id, tool_calls,
+    `SELECT id, role, tool_call_id, NULL AS tool_calls,
        COALESCE(
          CASE
            WHEN role = 'tool' THEN length(CAST(substr(content, 1, ?) AS BLOB))
@@ -458,16 +467,17 @@ function hermesRowsFrom(db: Database, sessionId: string, start: number): HermesM
 
   if (endId === null) return [];
 
-  const rows = db.query<HermesMessageRow, [number, number, string, number, number, number]>(
+  const rows = db.query<HermesMessageRow, [number, number, number, number, string, number, number, number]>(
     `SELECT id, role,
        CASE WHEN role = 'tool' THEN substr(content, 1, ?) ELSE substr(content, 1, ?) END AS content,
-       tool_call_id, tool_calls, tool_name, reasoning, timestamp,
+       tool_call_id, CASE WHEN length(CAST(tool_calls AS BLOB)) <= ? THEN tool_calls ELSE NULL END AS tool_calls,
+       tool_name, substr(reasoning, 1, ?) AS reasoning, length(reasoning) AS reasoning_chars, timestamp,
        CASE WHEN role = 'tool' THEN length(content) ELSE NULL END AS output_size,
        CASE WHEN role != 'tool' THEN length(CAST(content AS BLOB)) ELSE NULL END AS content_bytes
      FROM messages
      WHERE session_id = ? AND (active = 1 OR compacted = 1) AND id >= ? AND id <= ?
      ORDER BY id ASC LIMIT ?`,
-  ).all(TOOL_OUTPUT_CHARS, TRANSCRIPT_WINDOW_BYTES + 1, sessionId, start, endId, count);
+  ).all(TOOL_OUTPUT_CHARS, TRANSCRIPT_WINDOW_BYTES + 1, PAGE_TOOL_CALLS_BYTES, reasoningChars(), sessionId, start, endId, count);
 
   for (const row of rows) {
     if (row.role !== "tool" && typeof row.content === "string") {
@@ -476,6 +486,7 @@ function hermesRowsFrom(db: Database, sessionId: string, start: number): HermesM
         row.content = clipOversizedNonTool(row.content, TRANSCRIPT_WINDOW_BYTES);
       }
     }
+    if (typeof row.reasoning === "string" && (row.reasoning_chars ?? 0) > reasoningChars()) row.reasoning += "\n… trimmed";
   }
 
   return rows;

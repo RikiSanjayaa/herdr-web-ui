@@ -109,7 +109,7 @@ describe("workspaceAgentLabels", () => {
 });
 
 describe("agentContext", () => {
-  const base = { agentLabel: "claude", title: "Idempotent payments", machineName: null, workspaceLabel: "checkout-api", tabName: null };
+  const base = { agentLabel: "claude", title: "Idempotent payments", markAgent: null, machineName: null, workspaceLabel: "checkout-api", tabName: null };
 
   it("leaves a lone PC unnamed, as herdr does", () => {
     expect(agentContext(base)).toEqual(["claude", "checkout-api"]);
@@ -121,6 +121,12 @@ describe("agentContext", () => {
     expect(agentContext({ ...base, tabName: "Review" })).toEqual(["claude", "checkout-api", "Review"]);
     expect(agentContext({ ...base, tabName: " " })).toEqual(["claude", "checkout-api"]);
     expect(agentContext({ ...base, title: "claude" })).toEqual(["checkout-api"]);
+  });
+
+  it("leaves out the kind its mark already draws, and keeps a kind the mark does not say", () => {
+    expect(agentContext({ ...base, markAgent: "claude", tabName: "Review" })).toEqual(["checkout-api", "Review"]);
+    expect(agentContext({ ...base, agentLabel: "Claude", markAgent: "claude" })).toEqual(["checkout-api"]);
+    expect(agentContext({ ...base, agentLabel: "reviewer-bot", markAgent: "claude" })).toEqual(["reviewer-bot", "checkout-api"]);
   });
 });
 

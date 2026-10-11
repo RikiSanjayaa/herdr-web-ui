@@ -12,7 +12,7 @@ chrome color, amber: focus, the chosen lens, the terminal cursor and the user's 
 buttons). Agent states carry the remaining saturated colors and none of them is amber. The user's
 chat turns are neutral raised cards, so a long thread never turns into a wall of color. Dark is the
 default, light follows the same hierarchy, and comfortable or compact density changes scale without
-changing information architecture. A dark report look, a neutral charcoal one, Catppuccin and lilac are
+changing information architecture. A dark report look, a neutral charcoal one, Catppuccin, lilac and forest are
 opt-in palettes (Settings → Appearance → Colors); amber stays the default and the look before settings load.
 
 The sidebar is one grid: a leading cell that says who or what a row is (the coding agent's brand
@@ -69,12 +69,12 @@ paper, not UI, and the viewer (`.file-viewer-pdf`) must not tint it for the them
 
 ### Opt-in palettes
 
-`settings.palette` (`amber` default, `report`, `charcoal`, `catppuccin`, `lilac`) is written as `data-palette`. The
-tables above are amber, the base blocks; the four opt-in palettes override them in
+`settings.palette` (`amber` default, `report`, `charcoal`, `catppuccin`, `lilac`, `forest`) is written as `data-palette`. The
+tables above are amber, the base blocks; the five opt-in palettes override them in
 `[data-theme][data-palette]` blocks of `src/styles.css`, which hold the complete values.
 
 `--bubble-border` is the edge of the chat's user bubble. It is `transparent` where `--bg-elevated`
-alone parts the bubble from `--bg`: dark amber, dark report, dark charcoal and dark lilac. It is `var(--border)`
+alone parts the bubble from `--bg`: dark amber, dark report, dark charcoal, dark lilac and dark forest. It is `var(--border)`
 where the two surfaces sit close: every light theme (the `[data-theme="light"]` block sets it for
 all palettes) and dark Catppuccin, whose elevated surface is darker than its canvas.
 
@@ -115,6 +115,21 @@ all palettes) and dark Catppuccin, whose elevated surface is darker than its can
   states working `#85b8ff`, input `#ff94ad`, done `#92d9ab`, terminal `#18172f`, selection
   `#3a3768`. It keeps amber's rounded corners and card shadow, tinted indigo in light.
 
+- **Forest** is a low-saturation green-grey, flat on every surface, meant to be restful over a long
+  session (a preference, not a medical claim). In dark the canvas `--bg` `#101a16` sits under
+  chrome `--bg-panel` `#16231d` (elevated `#1d2d25`, hover `#263b30`, input `#132019`), borders `#2d4437` / `#3d5b49`, text `#d4e5d8` / `#9ab9a3` / `#edf7ef`, a pale green
+  accent and primary `#8fd3a2` (hover `#a7dfb5`) with `#102016` text. States keep hues of their
+  own: working `#79c7d4`, input `#ffa294`, done `#91d69a`, idle `#9ab9a3`; danger text `#ffd7d0`,
+  scrim `rgba(6, 14, 10, 0.6)`. Terminal `#16231d`, cursor `#8fd3a2`, selection `#31513e`. Light is
+  the same hue by day: canvas `#eaf2ed`, chrome `#f7fbf8` (elevated `#edf5ef`, hover `#e1eee5`,
+  input `#ffffff`), borders `#c9ddd0` / `#a7c3b2`, ink `#20352a` / `#4f6d5a` / `#15291e`, a green
+  accent `#2c7648` (darkened until it is AA on a hovered row) and primary `#397f50` (hover
+  `#2f6e44`) with white text, states working `#166578`, input `#a02b20`, done `#225f32`, idle
+  `#4f6d5a`, danger text `#9d3022`, scrim `rgba(24, 52, 35, 0.35)` and shadows tinted the same
+  green. Terminal `#f7fbf8`, cursor `#2c7648`, selection `#cfe5d5`. Tints are these colors at a
+  low alpha (0.1–0.16). It keeps amber's rounded corners and card shadow, and has syntax colors
+  of its own (below).
+
 ### Terminal theme
 
 xterm.js reads a JavaScript theme, so `src/lib/settings.ts` `terminalTheme()` mirrors these four
@@ -126,6 +141,29 @@ CSS tokens verbatim for each resolved theme and palette (`settings.test.ts` chec
 | Foreground | `--term-fg` | `#d8d0c3` | `#2a251f` | `foreground` |
 | Cursor | `--term-cursor` | `#f0a830` | `#8c5000` | `cursor` |
 | Selection | `--term-selection` | `#4a3d26` | `#f0d9ae` | `selectionBackground` |
+
+### Syntax highlighting
+
+Code in the chat is colored by `--syntax-*` tokens. Four follow the palette: `--syntax-comment` is
+`--text-dim`, `--syntax-function` is `--accent`, `--syntax-inserted` is `--status-done` and
+`--syntax-deleted` is `--status-blocked`. The other six are literals per block
+(each at least 4.5:1 on `--bg-panel` and `--bg-elevated`); light charcoal uses the light report
+column. Catppuccin follows Catppuccin's own mapping: keywords are mauve, so `--syntax-function` is
+blue there instead of `--accent`, and Latte's colors are darkened to stay readable.
+
+| Block | keyword | string | number | type | variable | meta |
+|-------|---------|--------|--------|------|----------|------|
+| Dark amber | `#e8875f` | `#a8c17c` | `#d6a0c9` | `#6cb8d6` | `#e0c08f` | `#b49dd6` |
+| Light amber | `#a33a17` | `#4b6b18` | `#8a3f7a` | `#155a72` | `#7a5418` | `#5d4791` |
+| Dark report | `#f78c6c` | `#3ddc97` | `#f5b544` | `#7fd4ff` | `#c9d1dc` | `#b392f0` |
+| Light report and charcoal | `#b3261e` | `#22743a` | `#8a5300` | `#0b6e8a` | `#3b3b3b` | `#6f42c1` |
+| Dark charcoal | `#d7a08a` | `#a7b789` | `#c2a2af` | `#9fb4c2` | `#dcd8d0` | `#b8a5c9` |
+| Catppuccin Mocha | `#cba6f7` | `#a6e3a1` | `#fab387` | `#f9e2af` | `#f5e0dc` | `#f5c2e7` |
+| Catppuccin Latte | `#712fc6` | `#2f7620` | `#b44201` | `#905c13` | `#4c4f69` | `#bc1d91` |
+| Dark forest | `#e6a96d` | `#91d69a` | `#d2b18a` | `#79c7d4` | `#d4e5d8` | `#c2a0d8` |
+| Light forest | `#9c4f15` | `#225f32` | `#865d13` | `#166578` | `#20352a` | `#68489c` |
+
+`--syntax-function` in Catppuccin: Mocha `#89b4fa`, Latte `#0b59f4`.
 
 ### Rules
 - Amber is the one chrome color. Accent (selected, focused, informational) and primary (the user's
@@ -201,16 +239,20 @@ CSS tokens verbatim for each resolved theme and palette (`settings.test.ts` chec
 
 ### Settings
 - `theme`: `dark`, `light`, or `system`; default `dark`.
-- `palette`: `amber`, `report`, `charcoal`, `catppuccin` or `lilac`; default `amber`.
+- `palette`: `amber`, `report`, `charcoal`, `catppuccin`, `lilac` or `forest`; default `amber`.
 - `density`: `comfortable` or `compact`; default `comfortable`.
 - `sidebarRows`: `one` or `two`; default `two`.
 - Terminal font size is independent: default `13px`, clamped to `10–22px`.
+  During a two-finger pinch the font follows the fingers live and a badge above the grid shows the
+  size in pixels; the grid refits locally and the shared pty resizes once when a finger lifts.
+  Cancellation restores the starting size.
 - Terminal and chat font families are comma-separated lists, default empty. They go in front of the
   terminal's built-in fonts (after the bundled Symbols Nerd Font Mono, which only draws icons) and of
   `--font-ui` in the chat's prose (as `--font-chat`), never in place of them; code in the chat keeps
   `--font-mono`. At most 200 characters, with `;`, `{`, `}`, `<`,
   `>`, `\` and control characters stripped and names with spaces quoted.
 - Composer Enter behavior and folded thinking visibility are preferences, not typography tokens.
+- `highlightCode` colors code in the chat by its language (default on; off shows plain text).
 - All settings share one sanitized `localStorage["herdr-web-ui:settings"]` record.
 
 ## 4. Spacing & Layout
@@ -316,7 +358,10 @@ One set for both themes: the card is island black wherever it shows.
   it from `769px` (`--strip-bg`: `--bg` under the chat lens, `--term-bg` otherwise, `--bg-panel`
   below `769px`) and keeps its hairline, under the chat the one line over the transcript (no
   fade under it). The update notice and a PC's action banner are drawn in the pane column, over
-  the tab strip, never across the window: the sidebar and its top row stay one piece. With the
+  the tab strip, never across the window: the sidebar and its top row stay one piece. A layout
+  call the palette made that a PC's bridge from before the route answered 404 to reads there too,
+  for a moment, as a `.pane-notice` line of `--status-blocked` `--fs-xs` text under a hairline
+  ("This PC's bridge does not offer this yet"); the tab's menu says the same at the strip's end. With the
   sidebar collapsed the toggle and the palette sit in the one bar. Below `769px` the header is the `--bg-panel` bar with
   its rule: the installed app's `theme-color` matches it.
 - From `769px` the sidebar's right edge is a grip (`.sidebar-resizer`, `role="separator"`): drag
@@ -379,41 +424,61 @@ One set for both themes: the card is island black wherever it shows.
 - Hover or `aria-selected` uses `--bg-hover`. Headings are dim uppercase micro labels.
 - The sidebar's row menu (`.row-menu`) is a `.menu` drawn through a portal at fixed coordinates,
   under its `⋯` with right edges aligned, above it when the screen ends first, and over the drawer.
-  A row offers Rename workspace, Rename pane (the pane it opens), New tab,
-  New worktree, Open worktree…, then Close workspace under a hairline. A worktree workspace has no worktree items and
-  ends in **Delete worktree checkout…** after Close workspace. The
-  danger item takes `--status-blocked`. At `<=640px` it is a `.modal` bottom sheet (`.row-sheet`):
-  a grip, the row's name and place, 48px rows and a Cancel button; Tab stays among them. Escape, a press outside and
+  Both the button and right-click offer the same native workspace actions: Rename workspace,
+  Close workspace/group, New/Open worktree for repository roots, Delete worktree checkout for
+  linked worktrees, and Expand/Collapse for a group. Pane renaming stays in the pane menu;
+  Move pane to… is in header More. The
+  danger item takes `--status-blocked`. The popover is as tall as its items, up to the room on
+  its side of the button (it scrolls only on a screen too short for it). At `<=640px` it is a `.modal` bottom sheet (`.row-sheet`):
+  a grip, the row's name and place, 48px rows and a Cancel button; Tab stays among them. The
+  rows scroll between the head and Cancel (`.row-sheet-items`), which stay put, when the sheet's
+  92% of the screen cannot hold them. Escape, a press outside and
   focus leaving it close it (on a desktop a scroll or a resize too), and focus returns to the
   `⋯`. Arrow keys move between items. A row that leaves the roster takes its open menu with it.
-  A right-click anywhere on a workspace or pane row opens the same menu under the row's `⋯`
-  (the menu key and Shift+F10 too, as the browser sends them); a name field being edited keeps
-  the browser's own menu, and a finger's long press is left alone (it picks the row up for a
-  drag, and the `⋯` is always shown on touch). PC headers and agent rows have no menu, so they
-  keep the browser's.
+  A workspace right-click opens at the pointer and leaves pane selection and keyboard focus
+  unchanged. It follows herdr's workspace scope: Rename, Close workspace/group, repository
+  worktree actions, and Expand/Collapse for a group. Dismissal restores the prior focus. The
+  explicit `⋯` uses those same actions at its button. An edited name keeps the browser's paste menu;
+  touch long press still reorders. Agents and PC headers keep the browser's context menu.
+  Agent rows only select their pane; they have no secondary action button or app context menu.
+
 - Close follows herdr's `ui.confirm_close`: a workspace close, or a pane close that takes its
   workspace with it, asks in a confirm first. A busy pane also asks before it stops. After a
   confirmed close, focus lands on the header's workspace-list toggle.
-- The tab strip's pane picker is the same menu: one item per pane of the tab, the agent's mark
-  (or the shell glyph) and the pane's title, the open pane named in the strong colour
-  (`aria-current`).
+- Tab and pane menus follow herdr's target scopes. A tab's menu contains New tab, Rename tab
+  and Close tab, plus Move tab left/right when a neighbouring position exists and no move is pending.
+  The pane's own context menu carries pane actions; it opens at the pointer
+  without changing which pane is focused. The pane header's ellipsis opens the same menu on touch.
+- **Move pane to…** (header More) opens a menu under the header button
+  (`MovePaneMenu`): a dim uppercase MOVE TO micro label with the pane's name under it
+  (`.move-pane-head`), then New tab and the workspace's other tabs, every other workspace under
+  a hairline, and New workspace under another. A pick moves the pane at once (`POST
+  /api/pane/move`); the app stays on a moved pane that was open, also under the new id herdr
+  gives a pane that changes workspace, and waits for the move's answer before it would read a
+  roster without the pane as the pane gone. A refusal reads as the row's or the strip's inline
+  error, herdr's own too ("Move failed: the tab is zoomed; unzoom it in herdr, then move the
+  pane"): a `changed: false` answer never closes the menu as if the pane had moved.
 
 ### Badge (`.badge`)
-- Agent states read **READY**, **RUN**, **INPUT**, **DONE**; unknown reads **—**.
+- Agent states read **READY**, **RUN**, **INPUT**, **DONE**; unknown reads **—**. **BG** is a pane
+  whose turn ended while work it started still runs in the background (`background_wait`): it
+  stands in for DONE or READY until that work's turn ends.
 - Idle is elevated/dim; working, blocked and done use their own tint and text. RUN carries a small
-  breathing dot before the word; the word itself never fades.
+  breathing dot before the word; the word itself never fades. BG takes the working tint and text,
+  holding still; a tab's dot for it is a working-coloured ring.
 - The written label and unknown dashed edge keep color from being the only signal.
 - The sidebar's compact variant weights each state by how much it asks of the user. Waiting for
   an answer is the one filled glyph, a filled message circle in `--status-blocked`; finished and
   not yet looked at is an 8px dot in `--status-done`, as an unread mark is; working is a stepped
-  spinning arc in `--text-dim`, since its motion already says it; ready and unknown draw
+  spinning arc in `--text-dim`, since its motion already says it; BG is the same arc held still in
+  `--status-working`, since nothing about it moves until its work ends; ready and unknown draw
   nothing. A pane herdr could not restore
   draws a warning triangle in `--status-blocked`. The element, its label and its tooltip are there
   for every state, and each drawn state has its own glyph as well as its color. Background tasks
   are a quiet count beside it (`.background-count`), not a badge.
 
 ### Pill (`.pill`)
-- Mono metadata at `--chip-h`. Offline is the one header pill and uses danger tokens.
+- Mono metadata at `--chip-h`. Offline is the one header pill that stays, and uses danger tokens. A deep link that could not open what it named, and Copy link, say so in a plain `.header-note` pill for a moment (8 s, 1.6 s for Link copied). The note takes the flexible context's place and ellipsizes when narrow, keeping the lens and More controls in view.
 
 ### Sidebar roster row and footer
 - No top bar. The sidebar opens with the plan panel (when Settings puts it there), the PC workspace groups and a separate **Agents** list spanning the connected PCs. A workspace starts from the `+` on its PC's header, or from the **New workspace**
@@ -440,7 +505,7 @@ One set for both themes: the card is island black wherever it shows.
   then ready); a folded worktree parent rolls up its whole group.
   Clicking its name opens the
   selected pane in that workspace, else the last viewed pane, else the pane herdr has focused,
-  else its first pane. Tabs and panes are selected from the tab strip and command palette.
+  else its first pane. Tabs are selected from the tab strip; panes are selected on the canvas or from the command palette.
 - A top-level workspace row starts with a folder glyph in the grid's leading cell, under the
   PC's monitor; the row's mark and name follow it. For a repository workspace with linked
   worktree workspaces that folder is the group's fold, a button (`.workspace-toggle`) in
@@ -469,7 +534,9 @@ One set for both themes: the card is island black wherever it shows.
   from that list, including a recognized OmO pane. Each row opens that agent's pane: the agent's
   bare brand mark, the pane's title, and one dim line naming the agent, then the PC (only when two
   or more are registered), the workspace and the tab (only when the workspace has two or more tabs
-  or the tab was renamed, and never when it repeats the workspace). Its background-task count and
+  or the tab was renamed, and never when it repeats the workspace). An agent with a live name
+  leads that line with it in `--font-mono` and `--text` (`.agent-name`); the kind takes the label's
+  place beside it, and the tooltip keeps the name. Its background-task count and
   compact status sit at the right. A pane that waits for an answer is not listed apart or moved
   up: its state shows on its workspace row and its agent row, and the alerts say the rest. Pane state is
   authoritative when the agent roster and pane status differ. The workspace and agent lists
@@ -506,6 +573,10 @@ One set for both themes: the card is island black wherever it shows.
   workspace. A custom worktree workspace name follows the branch on the same line in dim text.
   Selection uses a neutral rounded fill; workspace rows have no amber rail or separate reorder
   gutter. Drag the row itself, or press `Alt+↑/↓` while its selector is focused, to reorder it.
+  On a touch screen (`pointer: coarse`) the browser's drag is off: a long press (400ms, still
+  within 8px) lifts the row (`.is-lifted`: `--bg-elevated` with `--shadow-card`), it follows
+  the finger, the list scrolls near its edges, and a 2px `--accent` line (`data-drop`) shows
+  where it lands. Alt+Up/Down moves the focused row one step at a time.
   Dragging is disabled while a name field is open. Each workspace's `⋯` opens its row menu
   (`.row-menu-toggle`: no width at rest; shown on hover, focus, selection and while its menu is
   open; always on touch). Inline server failures
@@ -560,36 +631,58 @@ One set for both themes: the card is island black wherever it shows.
   instead of asking for one, and its name is the tab's (optional; the placeholder is the number
   herdr gives it). Submit calls `POST /api/tab/create` with the same agent launch.
 
-### Tab strip (`.tab-strip`)
-- herdr's tab row, over the pane: shown once the selected pane's workspace has more than one
-  pane (a second tab, or a tab split in the TUI), never for a lone pane. One `role="tab"` per tab
-  in herdr's order, named by its label, or **Tab n** while herdr still names it by its number;
-  a 7px dot before the name in the state's colour for working, blocked and done. The open tab
-  (the selected pane's) is underlined 2px in `--accent` and in the strong colour; the others are
-  dim. Arrow keys move between tabs. A tab opens the pane last viewed in it, else the one herdr
-  has focused there, else its first; a tab with several panes has a chevron beside its name that
-  opens a pane picker (the row menu). The strip ends in a `+` that opens the New tab dialog.
-  The open tab is scrolled into view when the selection comes from elsewhere (the sidebar, the
-  palette, an alert), and the `+` stays at the strip's end while the tabs scroll under it.
-- A tab is renamed and closed on the strip, as herdr's prefix+shift+t and prefix+shift+x. With
-  a mouse: a 20px `x` (`.tab-strip-close`) after the name, visible on the open tab and on the
-  one under the pointer or the focus, its place kept in every tab so widths do not move; a
-  double-click on the name swaps it for a field (`.tab-strip-rename`: Enter saves, Escape and a
-  blur leave the name, an empty field changes nothing because herdr would keep the empty name);
-  a right-click opens the tab's menu under its left edge; the middle button closes. With keys
-  on a focused tab: F2 and Delete. On a touch screen there is no `x`: the open tab carries the
-  chevron, and the menu is the bottom sheet. The menu lists the tab's panes when it has
-  several, then **Rename tab**, then **Close tab** in the danger colour under a hairline.
-- A close is immediate, as herdr's, and the tab beside it opens. It asks first (the confirm
-  dialog) only when it costs more than the tab: an agent in it is working or blocked, or it is
-  the workspace's last tab, which takes the workspace with it. A refusal shows in the dialog, or
-  as a line of `--status-blocked` text at the strip's end for six seconds.
-- The underline runs under the whole tab (`.tab-strip-item.is-active`), its `x` included. A tab
-  herdr names itself reads **Tab n** by its place in the row: herdr relabels it when a tab
-  before it closes.
-- `--control-h` tall on a hairline over `--bg-panel`, scrolling sideways without a scrollbar;
-  touch grows the buttons to `--touch-target`, and puts the pane picker beside its tab's name
-  instead of pulling it over the name's padding. The same strip on a phone.
+### Tab strip and pane canvas
+- The tab strip is shown even for one pane, as herdr's TUI shows its single tab and `+`.
+  Tabs retain their names, status dots, active underline, keyboard navigation, rename field and
+  close confirmation. A right-click opens tab actions at the pointer, including Move tab left/right
+  when a neighbouring position exists. Desktop tabs have no close or dropdown buttons. Touch and narrow layouts show a `⋯` beside
+  the selected tab for the same menu; Shift+F10 or the menu key opens it from a focused tab.
+  Pane actions are not tab actions.
+- Mouse dragging previews an accent insertion line, with edge scrolling for an overflowing strip.
+  The snapshot's tab order is authoritative: a tab's stable `number` is not its place. A drop calls
+  `tab.move` with an insertion boundary before removal, within that workspace and PC. The visible
+  order changes with herdr's snapshot, keeping selection and keyboard focus; a refusal shows an
+  inline error. One request waits for acknowledgement before another move is accepted. Escape,
+  a tab-list change or leaving the workspace cancels an unsent drag. Touch keeps native sideways
+  scrolling and uses Move tab left/right in the selected tab's menu; Alt+Shift+Left/Right provides
+  the same adjacent moves only while a tab has keyboard focus.
+- `PaneCanvas` draws every pane in the active tab at `layouts[].panes[].rect`, normalized to
+  the layout's own area. Panes share thin, square boundaries: `--border-strong` when inactive,
+  `--accent` around the selected pane. The compact header names its pane and provides the
+  ellipsis for touch and keyboard access. A lone or zoomed pane is borderless; its menu button
+  stays at the top-right (visible on hover/focus, always on touch).
+- A left click or keyboard focus selects the actual pane. Right-click opens the clicked pane's
+  menu without changing the selected pane: Rename pane, Clear pane name when named, Swap with
+  focused pane when another is selected, Split right, Split down, Zoom/Unzoom pane, the
+  right-click policy, Close pane. It appears at the pointer, clamped to the window. Up/Down
+  stop at the ends, hover selects, Enter acts, Escape and an outside click dismiss.
+- Split selects the new pane (`focus:true`), like the TUI. Swap exchanges the right-clicked
+  pane with the previously selected pane and retains the latter's focus. A close confirms when
+  the pane is busy or is the last pane of the workspace. Rename is herdr's label; clearing it
+  returns to its automatic title. Herdr owns every resulting layout and name.
+- Zoom uses herdr's zoom flag and focused pane. The other panes keep their mounted terminals
+  hidden, preserving attachments and drafts; unzoom restores their rectangles. Web selection
+  stays local to this browser and does not change herdr's focus in another client.
+- Drag the actual split boundary to resize, with an 8px hit region and native 0.1–0.9 ratio
+  limits. Its keyboard separator accepts arrow keys. `layout.set_split_ratio` receives the
+  binary path (false first, true second), at most 30 times a second, one request in flight;
+  release flushes the final ratio. A tab/topology change cancels the drag.
+- Every pane keeps its own xterm, attachment, input ownership, lens, chat state and file-path
+  context. Only the active pane may take keyboard focus after an asynchronous operation.
+- Switching tabs retains an outgoing terminal only while its explicit submit awaits a receipt;
+  its chat/input UI is unmounted and its grid is not resized. The receipt settles the original
+  draft before the pane attachment is released. No input is replayed. A canvas that already released
+  its panes while away opens a replacement as view-only until the user returns.
+- The unlocked app owns one connection per visited PC, shared by its pane mounts. A pane leaving
+  the canvas sends detach and loses its automatic-delivery lease, while the PC connection keeps
+  receiving authoritative held/removal receipts. Returning exposes the same pending ID for an
+  explicit Send now. Only an actual disconnect, PC removal, sign-out or app teardown suspends
+  connection proof; reconnect/reload never resumes pending delivery.
+  A newly split pane awaiting its first snapshot does not unmount its siblings. Geometry is
+  fitted inside each rendered pane; layout rectangles are never used as PTY dimensions.
+- Plain right-click can be passed to a mouse-reporting terminal when enabled for that pane.
+  Modified clicks, pane frames and non-reporting/read-only terminals still open the menu.
+  Native app shortcuts stay Mod+Shift in the browser, so Ctrl+key continues to reach the PTY.
 
 ### Worktree dialog (`.worktree-modal`)
 - From a workspace row's menu, as herdr's prefix+shift+g: **New worktree** asks for the branch
@@ -655,13 +748,18 @@ One set for both themes: the card is island black wherever it shows.
   text button in the regular weight beside it. Otherwise the answer keeps two labelled buttons,
   glyph + MD and glyph + TXT; where the primary pointer is coarse each is a `--touch-target` target on a
   one-line row, as is a user turn's copy, and a skill list under a user turn clears that target.
-- Markdown supports headings, lists, links, quotes, tables, inline/fenced code and code-copy actions.
+- Markdown supports headings, lists (a task item `- [x]` / `- [ ]` shows a checked or empty box in
+  place of its bullet, not clickable), links, quotes, tables, inline/fenced code and code-copy
+  actions.
   A link keeps `--accent` and a file chip reads in `--text-strong` with a dotted underline; both
   underlines are `--text-dim` at rest and both take the accent on hover and focus-visible.
   Code blocks are `--radius-lg` and never scroll inside: one longer than 30 lines opens at its
   first 20 behind **Show all N lines**. On touch a block has a header strip (language, copy);
   with a mouse and no touch screen the strip becomes a corner control over the block's top right,
   shown on hover or focus-within (no transition under reduced motion).
+  Fenced code is colored by role (`--syntax-*`) up to 100 KB, in a worker past 2 KB; a longer block,
+  or one the worker cannot color within 2 s, stays plain with a note under it. Past 20 000 lines
+  code is drawn as one text rather than an element per line, so it never holds the page.
   A table fills the reply's width; its cells, file paths included, break between words only, so a
   column is never narrower than its longest word, and a table without room scrolls sideways in
   its own box.
@@ -714,7 +812,8 @@ One set for both themes: the card is island black wherever it shows.
   `--text`, the agent as a hairline mono pill, the prompt in the bounded mono input box.
 
 ### Background tasks ended (`.chat-task-results`)
-- Where OmO reports background tasks that ended, the transcript shows one `--bg-elevated` card
+- Where OmO reports background tasks that ended, or a Claude Code subagent ends (its
+  `<task-notification>`, drawn once however many records carry it), the transcript shows one `--bg-elevated` card
   (hairline edge, `--radius-lg`) on the prose column: a dim `--fs-xs` line with the layers icon,
   "2 background tasks ended" and the time, then one hairline-separated row per task.
 - A row is the status icon (`--status-done` check, `--status-blocked` x, dim slash for
@@ -822,7 +921,7 @@ One set for both themes: the card is island black wherever it shows.
   pushed to the button's side. It draws, at `--fs-xs`: the model pill and the uploading
   or reconnecting sentence in `--text-dim`. The background-task chip is a button in the left controls;
   its count is repeated here as `.visually-hidden` text, so a change is still announced. The agent's written name, its separator, the state words
-  `READY` / `RUN` / `INPUT` / `DONE` and the sentence `Reasoning high` stay in it for assistive tech only
+  `READY` / `RUN` / `INPUT` / `DONE` / `BG` and the sentence `Reasoning high` stay in it for assistive tech only
   (`.visually-hidden`): the header names the pane, and the state is told by Stop, the live row
   and the prompt card. No state word is drawn in the chat composer.
 - The model pill (`.composer-pill`) holds the agent mark, the model, the reasoning level and the
@@ -944,12 +1043,48 @@ One set for both themes: the card is island black wherever it shows.
   Amber only; `--danger` stays for errors.
 
 ### Command palette
-- `Mod+Shift+K` opens a top-offset `--palette-w` dialog searching panes and actions. Recent panes
+- `Mod+Shift+K` opens a top-offset `--palette-w` dialog searching panes across all connected PCs
+  and the selected PC's actions. PC names participate in search. Recent panes
   lead an empty query; arrows in the search field cycle through visible results, Enter activates
   and Escape closes. IME candidate, commit and cancel keys stay with composition. Buttons reached
   with Tab keep their native activation, and arrow navigation scrolls the selected result into view.
-- Actions cover new workspace, lens/sidebar/theme, settings, notifications, lock and refresh, with
+- Actions cover new workspace, new tab, lens/sidebar/theme, settings, notifications, lock and refresh, with
   `.kbd` hints resolved from this browser's shortcut settings; disabled bindings have no hint.
+  With a pane selected they add herdr's **Split pane right / down**, the same **and open it**
+  (herdr's `--focus`: the new pane is opened here only then) and, in a tab of several panes,
+  **Zoom pane** / **Unzoom pane**.
+- Rows are grouped as herdr's Goto picker groups them: a `.menu-heading` per PC/workspace (PC
+  name when multiple PCs are registered, workspace name, a linked worktree's branch in mono when
+  the name does not say it, the row count), Recent (up to
+  three, an unsearched and unfiltered list only) before the workspaces, Actions last. The
+  workspaces stand in PC then roster order (a move in the sidebar moves the section); a search puts
+  the best match's workspace first, and finds a tab by the name the strip shows it under ("Tab 2").
+  A row's subtitle is "tab · folder" (the tab only in a workspace with several), "workspace · folder"
+  under Recent, with the owning PC shown when more than one is registered. A result selects its
+  captured PC and pane together. Disconnected PCs and stale recent targets are omitted.
+- Branch inventories are read only while the palette is open, under each connected PC's own
+  `MachineContext`, and accepted only for that PC's current workspace signature. Recent entries
+  store both machine and pane IDs; existing per-PC history migrates into the combined list.
+  New workspace, pane operations and plugin actions keep the selected PC's context and are not
+  retargeted by hovering or searching another PC's panes.
+- Status chips (`.palette-filter`, a `radiogroup`) sit between the search and the list: All, then
+  INPUT, RUN, READY, DONE, BG in `STATUS_WORD`'s words with counts over all connected PCs. The
+  checked chip takes its badge's tint and text (All and READY the neutral hover fill); a chip no
+  pane answers to keeps a dashed edge. A chip is `--control-h` minus `--space-2` tall, and on a
+  coarse pointer `--control-h` minus 2px with a `--touch-target` hit area. The row scrolls sideways
+  without a scrollbar where it does not fit. A status filter leaves the actions out; `>` at the
+  start of the query shows the actions alone and hides the chips.
+- The footer (`.palette-footer`) names the picked row's place (PC › workspace › tab, omitting
+  the PC for a single-PC roster) and its path in
+  mono; on a desktop it also carries the `.kbd` hints for Left/Right (workspace) and `>` (actions).
+- Keys: Left and Right step to the previous or next section from a row, or from the search field
+  while the caret sits at the text's edge; inside the text they move the caret. herdr's picker
+  letters (`b` `w` `i` `d` `a` for a filter, `/` back to the search) act only while the focus is
+  outside the search field, so they never take a letter from a query. A letter puts the focus on
+  the first row, also when it names the filter already shown. Left and Right on the chips move the
+  filter. The pick is a row, not a place: a pane leaving the filter above it moves the pick with its
+  row, and a picked row that leaves hands its place, and the focus, to the row now there (the search
+  when none is left). Below 640px the sheet is one fixed height, the chips and footer staying put.
 
 ### Settings dialog
 - A Settings shortcut opened over a file preview places Settings above it (`--z-modal + 2`, one
@@ -970,8 +1105,8 @@ One set for both themes: the card is island black wherever it shows.
   control, the X, Escape and the scrim take the same entries off. Beside the list, turning pages
   replaces the one entry. A reload steps out of the entries it finds; Forward reopens the page.
 - Pages, in order: **Appearance** (theme, colors, density, language, sidebar rows), **Chat**
-  (panes open in, show thinking, chat width, chat font size and family; then **Composer**: Enter
-  sends, suggestion chip; then **Quick replies**), **Terminal** (font size and family, wheel
+  (panes open in, show thinking, chat width, chat font size and family, highlight code; then
+  **Composer**: Enter sends, suggestion chip; then **Quick replies**), **Terminal** (font size and family, wheel
   speed, input mode, Key bar), **Alerts**, **Voice input**, **Subscription usage**,
   **Shortcuts** (the platform-resolved global bindings), **Phone & devices** (the phone address,
   Keep screen on, Install; then paired devices), **Remote PCs**, **About** (Updates, herdr,
@@ -1018,6 +1153,29 @@ One set for both themes: the card is island black wherever it shows.
   its eye closes; it stays listed so it can be shown again.
 
 ### Terminal host, key bar and drawer
+- **Find in terminal** in the header's More menu and Mod+Shift+F opens a find bar above the
+  grid. It uses the existing input and icon-button primitives: a query, match ordinal,
+  previous/next and close controls, with a dim note that scrolling is shared by all clients.
+  A phone places the query above the controls so neither counts nor touch targets are cut.
+  Enter searches backward initially, then advances forward; Shift+Enter goes backward.
+  Escape closes the bar and returns desktop focus to the terminal without changing its viewport.
+  Searches are explicit, literal and supplied by herdr; no browser scrollback is added.
+- `TerminalViewportTools` paints accent overlays for native, inclusive cell ranges after checking
+  the corresponding text and cell widths in xterm's current attach buffer. The current result has
+  a stronger fill and outline. The native response supplies at most 1024 ranges around a result;
+  the match count remains exact, and highlighting covers that returned window rather than every
+  match in unlimited history. Output, reflow and stale responses invalidate highlight data.
+- Automatic refresh uses `jump:false` only after an explicit search response includes both
+  `matches` and `scroll`. Older bridges can ignore unknown request fields, so they receive no
+  automatic search POST. Their explicit count and previous/next navigation remain unchanged.
+  Read-only views also send no automatic search POST and cannot drag the history scrollbar.
+- The separate history scrollbar sits in a reserved gutter alongside the grid and is hidden
+  when herdr reports no scrollback. Dragging the thumb, clicking the track or its focused arrows,
+  Page Up/Down and Home/End call `pane.scroll`; this moves the shared viewport for every client,
+  including the TUI. Pending pointer moves are coalesced, requests retain their owning PC/pane,
+  and a failed request displays an error instead of inventing a local history position.
+- Explicit Find cancels unsent scrollbar offsets and waits for a native scroll already sent;
+  the scrollbar is disabled until that search ends, so an older drag cannot overwrite its result.
 - xterm has `scrollback: 0`; wheel/touch gestures reach herdr's alternate-screen scrollback. The
   mount clips its own gutter and hides the unused xterm scrollbar.
 - Terminal banners stack top-right for ended, reconnecting, observe and held-draft review states.

@@ -7,7 +7,7 @@
  * the attribute); `[data-density="compact"]` overrides the type scale and row
  * heights. The base blocks are the amber palette, the default and the look before
  * settings load; `[data-palette]` blocks override them for the opt-in report,
- * charcoal and catppuccin palettes. xterm cannot read CSS custom properties, so the --term-* group
+ * charcoal, catppuccin, lilac and forest palettes. xterm cannot read CSS custom properties, so the --term-* group
  * is mirrored in settings.ts `terminalTheme()`.
  * Component-scoped rules live beside their component (Sidebar.css,
  * PaneTerminal.css, ...); this file owns the app shell, the header and the
@@ -69,6 +69,19 @@
   --term-fg: #d8d0c3;
   --term-cursor: #f0a830;
   --term-selection: #4a3d26;
+
+  /* syntax highlighting (components/HighlightedCode.css): the four derived roles follow the
+     palette because they are resolved on <html>, where data-theme and data-palette sit */
+  --syntax-comment: var(--text-dim);
+  --syntax-function: var(--accent);
+  --syntax-inserted: var(--status-done);
+  --syntax-deleted: var(--status-blocked);
+  --syntax-keyword: #e8875f;
+  --syntax-string: #a8c17c;
+  --syntax-number: #d6a0c9;
+  --syntax-type: #6cb8d6;
+  --syntax-variable: #e0c08f;
+  --syntax-meta: #b49dd6;
 
   /* type (comfortable density; compact overrides below) */
   --font-ui: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", "Malgun Gothic", sans-serif;
@@ -216,6 +229,12 @@
   --term-fg: #2a251f;
   --term-cursor: #8c5000;
   --term-selection: #f0d9ae;
+  --syntax-keyword: #a33a17;
+  --syntax-string: #4b6b18;
+  --syntax-number: #8a3f7a;
+  --syntax-type: #155a72;
+  --syntax-variable: #7a5418;
+  --syntax-meta: #5d4791;
 }
 
 /* Dark report palette (Settings → Appearance → Colors): a near-black blue-grey canvas
@@ -264,6 +283,12 @@
   --term-fg: #c9d1dc;
   --term-cursor: #4c9aff;
   --term-selection: #1f3a66;
+  --syntax-keyword: #f78c6c;
+  --syntax-string: #3ddc97;
+  --syntax-number: #f5b544;
+  --syntax-type: #7fd4ff;
+  --syntax-variable: #c9d1dc;
+  --syntax-meta: #b392f0;
 }
 
 /* Report and charcoal share plain paper in light; charcoal's own light block below
@@ -293,6 +318,12 @@
   --term-fg: #242424;
   --term-cursor: #1f5fcc;
   --term-selection: #cfe0fb;
+  --syntax-keyword: #b3261e;
+  --syntax-string: #22743a;
+  --syntax-number: #8a5300;
+  --syntax-type: #0b6e8a;
+  --syntax-variable: #3b3b3b;
+  --syntax-meta: #6f42c1;
 }
 
 /* Charcoal: neutral charcoal, a Ghostty-style terminal (the panel is its #171717), no
@@ -330,6 +361,12 @@
   --term-fg: #cbc7c0;
   --term-cursor: #cbc7c0;
   --term-selection: #49443d;
+  --syntax-keyword: #d7a08a;
+  --syntax-string: #a7b789;
+  --syntax-number: #c2a2af;
+  --syntax-type: #9fb4c2;
+  --syntax-variable: #dcd8d0;
+  --syntax-meta: #b8a5c9;
 }
 
 [data-theme="light"][data-palette="charcoal"] {
@@ -382,6 +419,14 @@
   --term-fg: #cdd6f4;
   --term-cursor: #f5e0dc;
   --term-selection: #3b3d4f;
+  /* Catppuccin's own mapping: keywords mauve, so functions take blue instead of --accent */
+  --syntax-keyword: #cba6f7;
+  --syntax-string: #a6e3a1;
+  --syntax-number: #fab387;
+  --syntax-type: #f9e2af;
+  --syntax-variable: #f5e0dc;
+  --syntax-meta: #f5c2e7;
+  --syntax-function: #89b4fa;
 }
 
 [data-theme="light"][data-palette="catppuccin"] {
@@ -418,6 +463,13 @@
   --term-fg: #4c4f69;
   --term-cursor: #dc8a78;
   --term-selection: #d2d4dc;
+  --syntax-keyword: #712fc6;
+  --syntax-string: #2f7620;
+  --syntax-number: #b44201;
+  --syntax-type: #905c13;
+  --syntax-variable: #4c4f69;
+  --syntax-meta: #bc1d91;
+  --syntax-function: #0b59f4;
 }
 
 /* Lilac: one quiet lavender. Light is the look it was drawn for: a lavender canvas (`--bg`)
@@ -492,6 +544,90 @@
   --term-fg: #2b2d4d;
   --term-cursor: #4a42c2;
   --term-selection: #dcd7f8;
+}
+
+/* Forest: low-saturation green-grey surfaces for long sessions. The accent stays green, while
+   working, blocked and done keep separate status hues. */
+[data-theme="dark"][data-palette="forest"] {
+  --bg: #101a16;
+  --bg-panel: #16231d;
+  --bg-elevated: #1d2d25;
+  --bg-hover: #263b30;
+  --bg-input: #132019;
+  --border: #2d4437;
+  --border-strong: #3d5b49;
+  --text: #d4e5d8;
+  --text-dim: #9ab9a3;
+  --text-strong: #edf7ef;
+  --accent: #8fd3a2;
+  --accent-tint: rgba(143, 211, 162, 0.14);
+  --primary: #8fd3a2;
+  --primary-hover: #a7dfb5;
+  --primary-text: #102016;
+  --primary-tint: rgba(143, 211, 162, 0.16);
+  --status-idle: #9ab9a3;
+  --status-working: #79c7d4;
+  --status-blocked: #ffa294;
+  --status-done: #91d69a;
+  --status-working-tint: rgba(121, 199, 212, 0.14);
+  --status-blocked-tint: rgba(255, 162, 148, 0.14);
+  --status-done-tint: rgba(145, 214, 154, 0.14);
+  --danger-tint: rgba(255, 162, 148, 0.12);
+  --danger-text: #ffd7d0;
+  --scrim: rgba(6, 14, 10, 0.6);
+  --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --term-bg: #16231d;
+  --term-fg: #d4e5d8;
+  --term-cursor: #8fd3a2;
+  --term-selection: #31513e;
+  --syntax-keyword: #e6a96d;
+  --syntax-string: #91d69a;
+  --syntax-number: #d2b18a;
+  --syntax-type: #79c7d4;
+  --syntax-variable: #d4e5d8;
+  --syntax-meta: #c2a0d8;
+}
+
+[data-theme="light"][data-palette="forest"] {
+  --bg: #eaf2ed;
+  --bg-panel: #f7fbf8;
+  --bg-elevated: #edf5ef;
+  --bg-hover: #e1eee5;
+  --bg-input: #ffffff;
+  --border: #c9ddd0;
+  --border-strong: #a7c3b2;
+  --text: #20352a;
+  --text-dim: #4f6d5a;
+  --text-strong: #15291e;
+  --accent: #2c7648;
+  --accent-tint: rgba(44, 118, 72, 0.1);
+  --primary: #397f50;
+  --primary-hover: #2f6e44;
+  --primary-text: #ffffff;
+  --primary-tint: rgba(57, 127, 80, 0.12);
+  --status-idle: #4f6d5a;
+  --status-working: #166578;
+  --status-blocked: #a02b20;
+  --status-done: #225f32;
+  --status-working-tint: rgba(22, 101, 120, 0.12);
+  --status-blocked-tint: rgba(160, 43, 32, 0.1);
+  --status-done-tint: rgba(34, 95, 50, 0.12);
+  --danger-tint: rgba(160, 43, 32, 0.1);
+  --danger-text: #9d3022;
+  --scrim: rgba(24, 52, 35, 0.35);
+  --shadow-drawer: 0 0 40px rgba(24, 52, 35, 0.22);
+  --shadow-pop: 0 16px 48px rgba(24, 52, 35, 0.16), 0 0 0 1px var(--border);
+  --shadow-card: 0 4px 16px rgba(24, 52, 35, 0.07);
+  --term-bg: #f7fbf8;
+  --term-fg: #20352a;
+  --term-cursor: #2c7648;
+  --term-selection: #cfe5d5;
+  --syntax-keyword: #9c4f15;
+  --syntax-string: #225f32;
+  --syntax-number: #865d13;
+  --syntax-type: #166578;
+  --syntax-variable: #20352a;
+  --syntax-meta: #68489c;
 }
 
 [data-chat-width="narrow"] {
@@ -654,6 +790,16 @@ button {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+/* a refusal of a palette layout call, over the pane for a moment: the tab strip's own line, with no strip to sit at the end of */
+.pane-notice {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  border-bottom: var(--hairline) solid var(--border);
+  color: var(--status-blocked);
+  font-size: var(--fs-xs);
 }
 
 .terminal-host {
@@ -1141,6 +1287,12 @@ button {
 .badge-done {
   color: var(--status-done);
   background: var(--status-done-tint);
+}
+
+/* BG: the turn ended on work still running in the background. The working colours, holding still */
+.badge-waiting {
+  color: var(--status-working);
+  background: var(--status-working-tint);
 }
 
 /* unknown keeps the dim text color (contrast) and is told apart by the dashed edge */

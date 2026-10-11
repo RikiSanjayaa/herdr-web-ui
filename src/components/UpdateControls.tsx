@@ -81,7 +81,7 @@ export function UpdateControls({ updates, bridgesFollow = false }: { updates: Up
   const installing = busy && (status?.phase === "building" || status?.phase === "restarting");
   const tabVersion = staleClientVersion(status, __APP_VERSION__);
   // focusable from code only: a button that points here (the header line's) lands on it
-  return <section className="settings-section settings-updates" tabIndex={-1} aria-labelledby="settings-updates-title">
+  return <section className="settings-section settings-updates" data-section="updates" tabIndex={-1} aria-labelledby="settings-updates-title">
     <h3 id="settings-updates-title">{t("Updates")}</h3>
     <div className="settings-card"><div className="settings-item">
     {/* always a version: the sidebar no longer carries one */}

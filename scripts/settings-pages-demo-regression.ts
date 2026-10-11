@@ -8,12 +8,13 @@ import { openSettingsPage } from "./settings-page.ts";
 import { KO } from "../src/lib/i18n.ko.ts";
 import { JA } from "../src/lib/i18n.ja.ts";
 import { ZH } from "../src/lib/i18n.zh.ts";
+import { terminalTheme } from "../src/lib/settings.ts";
 
 // Settings on the unmodified app over the demo's fixture transport: every page fits a phone, and
 // the browser's Back button steps out of the dialog instead of out of the app. All files and
 // HTTP traffic stay in this disposable, loopback-only app; no herdr session is opened.
 const app = mkdtempSync(join(tmpdir(), "herdr-settings-demo-"));
-const PAGES = ["Appearance", "Chat", "Terminal", "Alerts", "Voice input", "Subscription usage", "Shortcuts", "Phone & devices", "Remote PCs", "About"];
+const PAGES = ["Appearance", "Chat", "Terminal", "Alerts", "Voice input", "Subscription usage", "Shortcuts", "Phone & devices", "Remote PCs", "Agent integrations", "About"];
 const SETTINGS = { language: "en", showUsage: true, voiceInput: true, showQuickReplies: true };
 
 const dialogOf = (page: Page) => page.getByRole("dialog", { name: "Settings", exact: true });
@@ -65,6 +66,7 @@ try {
         const label = (name: string): string => strings[name] ?? name;
         const context = await browser.newContext({ viewport: { width, height: 760 }, isMobile: true, hasTouch: true, locale: language });
         try {
+          await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(url).origin });
           await context.addInitScript((settings) => { if (localStorage.getItem("herdr-web-ui:settings") === null) localStorage.setItem("herdr-web-ui:settings", settings); }, JSON.stringify({ ...SETTINGS, language }));
           const page = await context.newPage();
           const errors: string[] = [];
@@ -99,6 +101,58 @@ try {
                 "dictation selection does not change the display language");
               await dictation.selectOption("auto");
             }
+            if (name === "Agent integrations") {
+              // the demo's fixture, in herdr's order with the agents found on the PC first: a failed request
+              // would leave one error paragraph that still fits, so the rows and their states are asserted
+              const body = page.locator(".settings-body:not([hidden])");
+              assert.equal(await body.locator("[role='alert']").count(), 0, "the integrations page shows no error");
+              const install = (target: string): string => `herdr integration install ${target}`;
+              const shown = await body.locator(".settings-row").evaluateAll((nodes) => nodes.map((node) => ({
+                label: node.querySelector(".settings-label")?.textContent ?? "",
+                description: node.querySelector(".settings-description")?.textContent ?? "",
+                command: node.querySelector("code")?.textContent ?? null,
+                copy: node.querySelector("button")?.getAttribute("aria-label") ?? null,
+              })));
+              const copyLabel = (target: string): string => label("Copy the command for {name}").replace("{name}", target);
+              const missing = label("Not installed");
+              assert.deepEqual(shown, [
+                { label: "pi", description: missing + install("pi"), command: install("pi"), copy: copyLabel("pi") },
+                { label: "claude", description: label("Installed"), command: null, copy: null },
+                { label: "codex", description: label("Installed, but older than this herdr: run this to update it") + install("codex"), command: install("codex"), copy: copyLabel("codex") },
+                { label: "opencode", description: missing + install("opencode"), command: install("opencode"), copy: copyLabel("opencode") },
+                { label: "omp", description: missing + install("omp"), command: install("omp"), copy: copyLabel("omp") },
+                { label: "copilot", description: missing + install("copilot"), command: install("copilot"), copy: copyLabel("copilot") },
+                { label: "cursor", description: missing + install("cursor"), command: install("cursor"), copy: copyLabel("cursor") },
+                { label: "antigravity-cli", description: missing + install("antigravity-cli"), command: install("antigravity-cli"), copy: copyLabel("antigravity-cli") },
+              ], "every fixture integration, with its state and install command");
+              assert.deepEqual(await body.locator("h3").allTextContents(), [label("Not found on this PC")]);
+              const copy = body.getByRole("button", { name: copyLabel("codex"), exact: true });
+              await copy.tap();
+              await body.getByRole("button", { name: copyLabel("codex"), exact: true }).filter({ hasText: label("Copied") }).waitFor();
+              assert.equal(await page.evaluate(() => navigator.clipboard.readText()), install("codex"));
+            }
+            if (name === "Appearance" && language === "en") {
+              // an opt-in palette is written to the document and saved, and its block of styles.css
+              // reaches the page: its --term-* tokens read back as the theme xterm is given
+              const palette = page.getByLabel("Colors", { exact: true });
+              await palette.selectOption("forest");
+              await page.waitForFunction(() => document.documentElement.dataset.palette === "forest");
+              assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("herdr-web-ui:settings")!).palette), "forest");
+              const colors = await page.evaluate(() => {
+                const root = getComputedStyle(document.documentElement);
+                return {
+                  background: root.getPropertyValue("--term-bg").trim(),
+                  foreground: root.getPropertyValue("--term-fg").trim(),
+                  cursor: root.getPropertyValue("--term-cursor").trim(),
+                  selectionBackground: root.getPropertyValue("--term-selection").trim(),
+                };
+              });
+              assert.deepEqual(colors, terminalTheme("dark", "forest"), "Forest's --term-* tokens reach the page as the theme xterm is given");
+              if (process.env.UI_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, `forest-palette-${width}.png`), fullPage: true });
+              // the pages after this one are checked on the default palette
+              await palette.selectOption("amber");
+              await page.waitForFunction(() => document.documentElement.dataset.palette === "amber");
+            }
             assert.deepEqual(await cutOff(page), [], `${name} fits a ${width}px phone (${language})`);
           }
           await openSettingsPage(page, label("Terminal"), label("Back to settings"));
@@ -130,12 +184,38 @@ try {
               const box = menu.getBoundingClientRect(), row = active.getBoundingClientRect();
               return active.textContent?.includes("vim") && row.top >= box.top && row.bottom <= box.bottom;
             });
+            // Enter right after the keystroke that narrows the list, before React's next render, completes the row
+            await page.evaluate(async () => {
+              const box = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+              Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box, "/comments");
+              box.selectionStart = box.selectionEnd = box.value.length;
+              box.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+              await Promise.resolve(); await Promise.resolve();
+              box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+            });
+            await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>(".composer textarea")?.value === "/pr-comments ");
             await composer.fill("/comments");
             await menu.getByRole("option").filter({ hasText: "pr-comments" }).waitFor();
             assert.equal(await menu.getByRole("option").count(), 1);
             await composer.press("Tab");
             await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>(".composer textarea")?.value === "/pr-comments ");
             assert.equal(await composer.inputValue(), "/pr-comments ");
+            // a key typed after a completion, before the next frame (a busy phone), stays where it was typed
+            await composer.fill("/comments");
+            await menu.getByRole("option").filter({ hasText: "pr-comments" }).waitFor();
+            await page.evaluate(() => {
+              const real = window.requestAnimationFrame, held: FrameRequestCallback[] = [];
+              window.requestAnimationFrame = (callback) => { held.push(callback); return 0; };
+              addEventListener("release-frames", () => {
+                window.requestAnimationFrame = real;
+                for (const callback of held) callback(performance.now());
+              }, { once: true });
+            });
+            await composer.press("Tab");
+            await page.keyboard.type("a");
+            await page.evaluate(() => dispatchEvent(new Event("release-frames")));
+            await page.keyboard.type("b");
+            assert.equal(await composer.inputValue(), "/pr-comments ab");
             await composer.fill("/rln");
             await menu.getByRole("option").filter({ hasText: "release-notes" }).waitFor();
             assert.equal(await menu.getByRole("option").count(), 1);
@@ -159,7 +239,10 @@ try {
         const dialog = dialogOf(page);
         const list = dialog.getByRole("tablist");
 
-        // Back steps out one screen at a time: the key bar editor, the page, the list, and only then nothing
+        // Back steps out one screen at a time: the key bar editor, the page, the list, and only then nothing.
+        // The address names the pane shown (lib/deepLink.ts) once the roster is in: that is where Back returns
+        await page.waitForFunction(() => new URLSearchParams(window.location.search).has("pane"));
+        const before = page.url();
         await openSettings(page);
         assert.deepEqual(await entryOf(page), { page: null, keyBar: false, depth: 1 });
         await openSettingsPage(page, "Terminal");
@@ -175,7 +258,7 @@ try {
         await page.goBack();
         await page.locator(".settings-dialog").waitFor({ state: "detached" });
         assert.equal(await entryOf(page), null);
-        assert.equal(page.url(), url, "the last Back closes Settings and leaves the app where it was");
+        assert.equal(page.url(), before, "the last Back closes Settings and leaves the app where it was");
         await page.locator(".conn-live").waitFor({ state: "attached" });
         console.log("PASS Back on a phone leaves the key bar editor, then the page, then the list, and stays in the app");
 

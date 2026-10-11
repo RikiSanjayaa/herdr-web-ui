@@ -12,6 +12,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
+import { flushSync } from "react-dom";
 import { ArrowUp, FileText, Plus, Square, X } from "lucide-react";
 
 import "./Composer.css";
@@ -35,6 +36,7 @@ import {
   rankSlashCommands,
   terminalOnlyCommand,
 } from "../lib/compose.ts";
+import { paneStatus } from "../lib/status.ts";
 import { modelLabel } from "../lib/modelName.ts";
 import { useFacesArrived } from "../lib/fontFaces.ts";
 import { activeTrigger, applyCompletion, type ActiveTrigger } from "../lib/mentions.ts";
@@ -44,21 +46,27 @@ import { AgentMark } from "./AgentMark.tsx";
 import { BackgroundTasks } from "./BackgroundTasks.tsx";
 import { MicButton, VoiceRecordingPill, useDictation } from "./VoiceInput.tsx";
 import { useT } from "../lib/i18n.ts";
+import { modalOpen } from "../lib/focus.ts";
 
 export interface ComposerProps {
   connected: boolean;
   paneId: string;
   /** false: appearing must not take the keyboard (App switched to this pane on its own) */
   autoFocus?: boolean;
+  active?: boolean;
   agent: string | null;
   agentStatus?: AgentStatus;
   /** an OmO pane's running background tasks: the status line opens their list */
   backgroundTasks?: number;
+  /** the pane's turn ended on work still running in the background: its word is BG, not DONE (lib/status.ts paneStatus) */
+  backgroundWait?: boolean;
   metadata?: ConversationMetadata | null;
   /** replaces the placeholder: how a message answers the agent's waiting prompt */
   answerHint?: string | null;
   /** what the agent suggests typing next (Claude's grey input text): the placeholder, taken with Tab */
   suggestion?: string | null;
+  /** a cancelled send the agent put back in its input box: the empty box takes it again, for editing and resending */
+  restored?: string | null;
   /** an empty chat's greeting: it stands over the composer's column and takes no row of its own */
   greeting?: ReactNode;
   /** true: sent, clear the box; a string: keep the text and say why; a promise settles to either */
@@ -208,18 +216,23 @@ export function Composer({
   connected,
   paneId,
   autoFocus = true,
+  active = true,
   agent,
   agentStatus,
   backgroundTasks = 0,
+  backgroundWait = false,
   metadata,
   answerHint = null,
   suggestion = null,
+  restored = null,
   greeting = null,
   onSend,
   onAbort,
   onUploadImage,
 }: ComposerProps) {
   const t = useT();
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const machineId = useMachineId();
   const { fetchPaneCommands, fetchPaneFiles } = useMachineApi();
   const { settings } = useSettings();
@@ -241,7 +254,7 @@ export function Composer({
   // it), as the grid does in the terminal lens: a pane picked from the drawer is typed into
   // and once the user picks the pane App had switched to on its own
   useEffect(() => {
-    if (autoFocus) textareaRef.current?.focus({ preventScroll: true });
+    if (autoFocus && !modalOpen()) textareaRef.current?.focus({ preventScroll: true });
   }, [autoFocus]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const attachmentsRef = useRef<Attachment[]>([]);
@@ -254,10 +267,12 @@ export function Composer({
   const [caret, setCaret] = useState(text.length);
   const textRef = useRef(text);
   const caretRef = useRef(caret);
+  /** the restored text the box was filled with: only that fill is ever cleared, never the user's own typing */
+  const filledFrom = useRef<string | null>(null);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [files, setFiles] = useState<string[]>([]);
   const [slashUsage, setSlashUsage] = useState<Record<string, number>>(readSlashUsage);
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [storedIndex, setSelectedIndex] = useState(0);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -289,6 +304,29 @@ export function Composer({
   const placeholder = !connected
     ? t("Reconnecting… message held here, never queued")
     : answerHint ?? offered ?? t("Message {agent}…", { agent: agentLabel });
+
+  // A cancelled send the agent put back in its input box fills an empty box again — without
+  // focus, which would raise a phone's keyboard. When it is gone, only the untouched fill is
+  // cleared: text the user typed or edited over it is their own and stays.
+  useEffect(() => {
+    if (restored !== null) {
+      if (restored === filledFrom.current || textRef.current.trim() !== "" || sending) return;
+      setText(restored);
+      textRef.current = restored;
+      caretRef.current = restored.length;
+      setCaret(restored.length);
+      filledFrom.current = restored;
+      return;
+    }
+    if (filledFrom.current === null) return;
+    if (textRef.current === filledFrom.current) {
+      setText("");
+      textRef.current = "";
+      caretRef.current = 0;
+      setCaret(0);
+    }
+    filledFrom.current = null;
+  }, [restored]);
 
   useEffect(() => {
     let live = true;
@@ -519,14 +557,14 @@ export function Composer({
   );
   const choices: readonly (SlashCommand | string)[] = trigger?.kind === "slash" ? orderedCommands : files;
   const menuOpen = !menuDismissed && trigger !== null && choices.length > 0;
-
-  useEffect(() => {
-    if (selectedIndex >= choices.length) setSelectedIndex(Math.max(0, choices.length - 1));
-  }, [choices.length, selectedIndex]);
+  // clamped as the list is drawn, not by an effect after it: a Tab or Enter typed before that
+  // effect's render found no row at the old index and did nothing
+  const selectedIndex = Math.min(storedIndex, Math.max(0, choices.length - 1));
 
   // dictation lands at the caret without taking focus (a phone's keyboard stays as it was)
   const dictation = useDictation({
     mode: "chat",
+    active,
     connected,
     phone: mobile,
     polish: settings.voicePolishChat,
@@ -553,15 +591,17 @@ export function Composer({
     const clampedCaret = Math.min(nextCaret, MAX_COMPOSER_CHARS);
     textRef.current = limitedText;
     caretRef.current = clampedCaret;
-    setText(limitedText);
-    setCaret(clampedCaret);
-    setMenuDismissed(false);
-    requestAnimationFrame(() => {
-      const element = textareaRef.current;
-      if (!element) return;
-      element.selectionStart = element.selectionEnd = clampedCaret;
-      element.focus();
+    // committed now and the caret placed in the same task: a placement deferred to the next frame
+    // would land on whatever was typed or selected meanwhile, behind a key typed right after a completion
+    flushSync(() => {
+      setText(limitedText);
+      setCaret(clampedCaret);
+      setMenuDismissed(false);
     });
+    const element = textareaRef.current;
+    if (!element) return;
+    element.selectionStart = element.selectionEnd = clampedCaret;
+    if (activeRef.current) element.focus();
   }, []);
 
   const insertMentionAtCursor = useCallback(
@@ -711,7 +751,7 @@ export function Composer({
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault();
           const direction = event.key === "ArrowDown" ? 1 : -1;
-          setSelectedIndex((current) => (current + direction + choices.length) % choices.length);
+          setSelectedIndex((current) => (Math.min(current, choices.length - 1) + direction + choices.length) % choices.length);
           return;
         }
         if (event.key === "Enter" || event.key === "Tab") {
@@ -776,6 +816,8 @@ export function Composer({
   );
 
   const isWorking = agentStatus === "working";
+  // what the status line says; what may be sent, queued or stopped goes by the agent's own status
+  const shownStatus = paneStatus({ agent_status: agentStatus, ...(backgroundWait ? { background_wait: true as const } : {}) });
   const statusCompact = composerStatusCompact(cardWidth);
   const sendShown = composerSendShown({ working: isWorking, text });
   const hint = composerStatusHint({ uploading, connected, text });
@@ -981,19 +1023,19 @@ export function Composer({
             <Plus aria-hidden="true" />
           </button>
           {dictation.shown && <MicButton dictation={dictation} />}
-          <BackgroundTasks paneId={paneId} count={backgroundTasks} omo={agent === "omo"} />
+          <BackgroundTasks paneId={paneId} count={backgroundTasks} omo={agent === "omo"} claude={agent === "claude"} />
         </div>
         {/* between the two control groups of the card's last row. The agent's name, its separator and the
             state word are read, not drawn: the mark and the header name the agent, and Stop, the live row and
             the prompt card say the state. All state words stay available to assistive tech only.
             Where the model label does not fit, it steps out and is still read (fitStatus marks data-model) */}
-        <div ref={statusRef} className="composer-status" role="status" data-status={agentStatus ?? "unknown"}
+        <div ref={statusRef} className="composer-status" role="status" data-status={shownStatus}
           data-offline={connected ? undefined : ""} data-hint={hint ?? undefined}>
           {/* everything but the sentence: one row that never wraps, also where the sentence takes a line of its own */}
           <span className="composer-status-meta">
             <span className="composer-agent-label visually-hidden">{agentLabel}</span>
             <span className="composer-status-separator visually-hidden" aria-hidden="true">·</span>
-            <strong className="visually-hidden">{t(composerStatusWord(agentStatus))}</strong>
+            <strong className="visually-hidden">{t(composerStatusWord(shownStatus))}</strong>
             {/* the mark, the model, the level and the context ring as one quiet pill. It only shows: no role,
                 no focus, nothing to press but the ring inside it. A pane that names no model draws no pill
                 (.is-bare): the mark, a level if it has one, and the ring stand in the row as they are */}

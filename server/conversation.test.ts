@@ -487,6 +487,245 @@ describe("parseClaudeTranscript", () => {
     ]);
   });
 
+  it("drops a prompt cancelled before any reply when Claude Code re-sends it from the same parent", () => {
+    // Claude Code 2.1.296 on send, Esc before any reply, then a re-send: the cancelled record
+    // and the re-send are siblings under one parent, only bookkeeping lines between, and the
+    // TUI shows only the re-send
+    const turns = parseClaudeTranscript([
+      JSON.stringify({ type: "user", uuid: "a35be47b", parentUuid: "07055903", timestamp: "2026-10-10T08:00:00.000Z", message: { role: "user", content: "apple 2-87" } }),
+      JSON.stringify({ type: "attachment", attachment: { type: "file-history-snapshot" } }),
+      JSON.stringify({ type: "last-prompt" }),
+      JSON.stringify({ type: "user", uuid: "7477aa61", parentUuid: "07055903", timestamp: "2026-10-10T08:00:04.000Z", message: { role: "user", content: "cherry 2" } }),
+      JSON.stringify({ type: "assistant", timestamp: "2026-10-10T08:00:06.000Z", message: { role: "assistant", content: [{ type: "text", text: "Cherry." }] } }),
+    ].join("\n"));
+    expect(turns).toEqual([
+      { role: "user", ts: "2026-10-10T08:00:04.000Z", parts: [{ kind: "text", text: "cherry 2" }] },
+      { role: "assistant", ts: "2026-10-10T08:00:06.000Z", end_ts: "2026-10-10T08:00:06.000Z", parts: [{ kind: "text", text: "Cherry." }] },
+    ]);
+  });
+
+  it("keeps a prompt re-sent from the same parent when the first one was answered", () => {
+    const turns = parseClaudeTranscript([
+      JSON.stringify({ type: "user", uuid: "u1", parentUuid: "p", timestamp: "2026-10-10T08:00:00.000Z", message: { role: "user", content: "first" } }),
+      JSON.stringify({ type: "assistant", timestamp: "2026-10-10T08:00:02.000Z", message: { role: "assistant", content: [{ type: "text", text: "one answer" }] } }),
+      JSON.stringify({ type: "user", uuid: "u2", parentUuid: "p", timestamp: "2026-10-10T08:00:05.000Z", message: { role: "user", content: "second" } }),
+    ].join("\n"));
+    expect(turns.map((turn) => [turn.role, turn.parts[0]])).toEqual([
+      ["user", { kind: "text", text: "first" }],
+      ["assistant", { kind: "text", text: "one answer" }],
+      ["user", { kind: "text", text: "second" }],
+    ]);
+  });
+
+  it("keeps an unanswered prompt when the next one hangs from another parent", () => {
+    // an ordinary next prompt's parent is the answer before it, not the earlier prompt's
+    const turns = parseClaudeTranscript([
+      JSON.stringify({ type: "user", uuid: "u1", parentUuid: "p", timestamp: "2026-10-10T08:00:00.000Z", message: { role: "user", content: "first" } }),
+      JSON.stringify({ type: "user", uuid: "u2", parentUuid: "q", timestamp: "2026-10-10T08:00:05.000Z", message: { role: "user", content: "second" } }),
+    ].join("\n"));
+    expect(turns.map((turn) => [turn.role, turn.parts[0]])).toEqual([
+      ["user", { kind: "text", text: "first" }],
+      ["user", { kind: "text", text: "second" }],
+    ]);
+  });
+
+  it("sees the cancelled prompt whether it was written as a string or as blocks", () => {
+    const turns = parseClaudeTranscript([
+      JSON.stringify({ type: "user", uuid: "u1", parentUuid: "p", timestamp: "2026-10-10T08:00:00.000Z", message: { role: "user", content: "string draft" } }),
+      JSON.stringify({ type: "user", uuid: "u2", parentUuid: "p", timestamp: "2026-10-10T08:00:03.000Z", message: { role: "user", content: [{ type: "text", text: "block resend" }] } }),
+      JSON.stringify({ type: "assistant", timestamp: "2026-10-10T08:00:04.000Z", message: { role: "assistant", content: [{ type: "text", text: "answer" }] } }),
+      JSON.stringify({ type: "user", uuid: "u3", parentUuid: "a", timestamp: "2026-10-10T08:01:00.000Z", message: { role: "user", content: [{ type: "text", text: "block draft" }] } }),
+      JSON.stringify({ type: "user", uuid: "u4", parentUuid: "a", timestamp: "2026-10-10T08:01:03.000Z", message: { role: "user", content: "string resend" } }),
+      JSON.stringify({ type: "assistant", timestamp: "2026-10-10T08:01:05.000Z", message: { role: "assistant", content: [{ type: "text", text: "another" }] } }),
+    ].join("\n"));
+    expect(turns.map((turn) => [turn.role, turn.parts[0]])).toEqual([
+      ["user", { kind: "text", text: "block resend" }],
+      ["assistant", { kind: "text", text: "answer" }],
+      ["user", { kind: "text", text: "string resend" }],
+      ["assistant", { kind: "text", text: "another" }],
+    ]);
+  });
+
+  it("hides the cancelled prompt on the live page too once its re-send arrives", () => {
+    // Live records: user a35be47b parented on 07055903, cancelled before any reply (only
+    // attachment/last-prompt bookkeeping after it), then re-send 7477aa61 on the same
+    // parent and the answer. The re-send opens no new turn, so the cancelled record stays
+    // inside the live tail the sibling rule reparses instead of settling visible.
+    const root = mkdtempSync(join(tmpdir(), "herdr-resend-page-"));
+    try {
+      const path = join(root, "session.jsonl");
+      const write = (...entries: unknown[]) => appendFileSync(path, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+      const prompt = (uuid: string, parentUuid: string, text: string, timestamp: string) =>
+        ({ type: "user", uuid, parentUuid, timestamp, message: { role: "user", content: text } });
+      const answer = (text: string, timestamp: string) =>
+        ({ type: "assistant", timestamp, message: { role: "assistant", content: [{ type: "text", text }] } });
+      const texts = (turns: ConversationTurn[]) => turns.flatMap((turn) => turn.parts.flatMap((part) => part.kind === "text" ? [part.text] : []));
+      write(prompt("u0", "p0", "first ask", "2026-10-10T08:00:00.000Z"), answer("first answer", "2026-10-10T08:00:02.000Z"),
+        prompt("a35be47b", "p1", "apple 2-87", "2026-10-10T08:01:00.000Z"),
+        { type: "attachment", attachment: { type: "file-history-snapshot" } }, { type: "last-prompt" });
+      expect(texts(transcriptPage("claude-transcript", path).turns)).toEqual(["first ask", "first answer", "apple 2-87"]);
+      write(prompt("7477aa61", "p1", "cherry 2", "2026-10-10T08:01:04.000Z"), answer("Cherry.", "2026-10-10T08:01:06.000Z"));
+      const warm = transcriptPage("claude-transcript", path);
+      expect(texts(warm.turns)).toEqual(["first ask", "first answer", "cherry 2", "Cherry."]);
+      forgetTranscriptState();
+      expect(transcriptPage("claude-transcript", path).turns).toEqual(warm.turns);
+      // an ordinary next prompt hangs from another parent and still opens a turn of its own
+      write(prompt("u9", "p9", "next ask", "2026-10-10T08:02:00.000Z"));
+      expect(texts(transcriptPage("claude-transcript", path).turns)).toEqual(["first ask", "first answer", "cherry 2", "Cherry.", "next ask"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      forgetTranscriptState();
+    }
+  });
+
+  describe("subagent notifications", () => {
+    const roots: string[] = [];
+    afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); forgetTranscriptState(); });
+    const block = (summary: string, extra = "<result>found two issues</result>") =>
+      `<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n<summary>${summary}</summary>\n${extra}\n</task-notification>`;
+    /** the three records one completion is written as */
+    const carriers = (content: string, timestamp: string) => [
+      { type: "queue-operation", operation: "enqueue", timestamp, content },
+      { type: "user", timestamp, message: { role: "user", content } },
+      { type: "attachment", timestamp, attachment: { type: "queued_command", commandMode: "task-notification", prompt: content } },
+    ];
+    const read = (entries: unknown[], subagents?: Parameters<typeof parseClaudeTranscript>[2]) =>
+      parseClaudeTranscript(entries.map((entry) => JSON.stringify(entry)).join("\n"), MAX_TURNS, subagents);
+    const start = { type: "user", timestamp: "2026-10-05T00:00:00.000Z", message: { role: "user", content: "review it" } };
+
+    it("deduplicates across settled/live boundaries without suppressing resumed completions or later pages", () => {
+      const root = mkdtempSync(join(tmpdir(), "herdr-subagent-page-")); roots.push(root);
+      const path = join(root, "s1.jsonl");
+      const write = (...entries: unknown[]) => appendFileSync(path, entries.map((entry) => JSON.stringify(entry) + "\n").join(""));
+      const prompt = (n: number) => ({ ...start, message: { role: "user", content: `prompt ${n}` } });
+      const notices = carriers(block('Agent "Review" finished'), "2026-10-05T00:01:00.000Z");
+      const cards = (answer: ReturnType<typeof transcriptPage>) => answer.turns.flatMap((turn) => turn.parts).filter((part) => part.kind === "task_result");
+      write(prompt(1), notices[0], prompt(2), notices[1]);
+      expect(cards(transcriptPage("claude-transcript", path))).toHaveLength(1);
+      write(notices[2]);
+      expect(cards(transcriptPage("claude-transcript", path))).toHaveLength(1);
+      write(prompt(3));
+      const warm = transcriptPage("claude-transcript", path);
+      forgetTranscriptState();
+      expect(transcriptPage("claude-transcript", path).turns).toEqual(warm.turns);
+      write(...carriers(block('Agent "Review" finished').replace("toolu_1", "toolu_2"), "2026-10-05T00:02:00.000Z"));
+      expect(cards(transcriptPage("claude-transcript", path))).toHaveLength(2);
+      // Reparse the live suffix after another append; its dedup set must not persist across polls.
+      write({ type: "assistant", message: { content: [{ type: "text", text: "answer" }] } });
+      expect(cards(transcriptPage("claude-transcript", path))).toHaveLength(2);
+      // Slide the page start past the first carrier. Deduplication belongs to the requested page.
+      for (let n = 4; n < MAX_TURNS + 4; n++) write(prompt(n));
+      write(notices[1]);
+      const newest = transcriptPage("claude-transcript", path);
+      expect(cards(newest)).toHaveLength(1);
+      const older = transcriptPage("claude-transcript", path, { before: newest.cursor! });
+      forgetTranscriptState();
+      expect(transcriptPage("claude-transcript", path).turns).toEqual(newest.turns);
+      expect(transcriptPage("claude-transcript", path, { before: newest.cursor! }).turns).toEqual(older.turns);
+    });
+
+    it("draws a queue-only completion before the active turn, but not its removal", () => {
+      const content = block('Agent "Review the parser" finished');
+      const turn = { type: "assistant", timestamp: "2026-10-05T00:00:01.000Z", message: { role: "assistant", stop_reason: "tool_use", content: [{ type: "tool_use", id: "toolu_1", name: "Agent", input: {} }] } };
+      const queued = { type: "queue-operation", operation: "enqueue", timestamp: "2026-10-05T00:01:00.000Z", content };
+      const turns = read([start, turn, queued]);
+      expect(turns.map((entry) => entry.parts.map((part) => part.kind).join())).toEqual(["text", "task_result", "tool"]);
+      expect(turns[1]?.parts[0]).toMatchObject({ kind: "task_result", tasks: [{ id: "a1", status: "completed", result: "found two issues" }] });
+      expect(read([start, turn, { ...queued, operation: "remove" }]).flatMap((entry) => entry.parts).filter((part) => part.kind === "task_result")).toEqual([]);
+    });
+
+    it("skips garbled lines and incomplete notification envelopes without a success card", () => {
+      const content = block('Agent "Review the parser" finished').replace("</task-notification>", "");
+      const transcript = `null\n42\n{garbled\n${JSON.stringify(start)}\n${JSON.stringify({ type: "user", message: { content } })}\n{"type":`;
+      expect(parseClaudeTranscript(transcript)).toEqual(read([start]));
+    });
+
+    it("becomes one task_result however many records carry it, and starts a turn of its own", () => {
+      const turns = read([
+        start,
+        { type: "assistant", timestamp: "2026-10-05T00:00:01.000Z", message: { role: "assistant", content: [{ type: "text", text: "started a reviewer" }] } },
+        ...carriers(block('Agent "Review the parser" finished'), "2026-10-05T00:01:00.000Z"),
+        { type: "assistant", timestamp: "2026-10-05T00:01:02.000Z", message: { role: "assistant", content: [{ type: "text", text: "it found two" }] } },
+      ], { subagents: new Map([["a1", { title: "Review parser fix", agent: "reviewer" }]]) });
+      expect(turns.map((turn) => turn.role)).toEqual(["user", "assistant", "user", "assistant"]);
+      expect(turns[2]).toEqual({ role: "user", ts: "2026-10-05T00:01:00.000Z", parts: [{ kind: "task_result", tasks: [{
+        id: "a1", title: "Review parser fix", agent: "reviewer", model: null, status: "completed",
+        duration_ms: null, turns: null, tool_calls: null, tokens: null, result: "found two issues",
+      }] }] });
+    });
+
+    it("draws a notice that shares an entry with a tool's result once, before the turn still at work", () => {
+      const notice = block('Agent "Review the parser" finished');
+      const entries = [
+        start,
+        { type: "assistant", timestamp: "2026-10-05T00:00:01.000Z", message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_9", name: "Bash", input: { command: "ls" } }] } },
+        { type: "user", timestamp: "2026-10-05T00:01:00.000Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_9", content: "a.ts" }, { type: "text", text: notice }] } },
+        { type: "assistant", timestamp: "2026-10-05T00:01:01.000Z", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "finished" }] } },
+      ];
+      for (const turns of [read(entries), read([...entries, ...carriers(notice, "2026-10-05T00:01:00.000Z")])]) {
+        expect(turns.map((turn) => turn.parts.map((part) => part.kind).join())).toEqual(["text", "task_result", "tool,text"]);
+        const tool = turns[2]?.parts[0];
+        expect(tool?.kind === "tool" ? tool.output : tool).toBe("a.ts");
+      }
+    });
+
+    it("takes a page's card from the subagent's meta file alone, so it reads the same however the subagent's transcript has grown", () => {
+      const root = mkdtempSync(join(tmpdir(), "herdr-subagent-page-")); roots.push(root);
+      const path = join(root, "s1.jsonl");
+      mkdirSync(join(root, "s1", "subagents"), { recursive: true });
+      writeFileSync(join(root, "s1", "subagents", "agent-a1.meta.json"), JSON.stringify({ agentType: "reviewer", description: "Review parser fix", toolUseId: "toolu_1", requestShape: "background" }));
+      const work = join(root, "s1", "subagents", "agent-a1.jsonl");
+      writeFileSync(work, JSON.stringify({ type: "assistant", timestamp: "2026-10-05T00:00:20.000Z", message: { id: "m1", content: [] } }) + "\n");
+      writeFileSync(path, [start, ...carriers(block('Agent "Review the parser" finished'), "2026-10-05T00:01:00.000Z")].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+      const card = () => { forgetTranscriptState(); return transcriptPage("claude-transcript", path).turns.flatMap((turn) => turn.parts).find((candidate) => candidate.kind === "task_result"); };
+      const before = card();
+      expect(before?.kind === "task_result" ? before.tasks[0] : before).toMatchObject({ title: "Review parser fix", agent: "reviewer", turns: null, tokens: null, duration_ms: null });
+      // the agent goes on working: the card does not change with it
+      appendFileSync(work, JSON.stringify({ type: "assistant", timestamp: "2026-10-05T00:09:00.000Z", message: { id: "m2", content: [] } }) + "\n");
+      expect(card()).toEqual(before);
+    });
+
+    it("reads no file for an id that a tool's output quoted with the tag", () => {
+      const root = mkdtempSync(join(tmpdir(), "herdr-subagent-page-")); roots.push(root);
+      const path = join(root, "s1.jsonl");
+      mkdirSync(join(root, "s1", "subagents"), { recursive: true });
+      writeFileSync(join(root, "secret.meta.json"), JSON.stringify({ description: "SECRET", agentType: "x" }));
+      const quoted = block('Agent "Hostile" finished').replace("<task-id>a1", "<task-id>x/../../secret");
+      writeFileSync(path, [start,
+        { type: "user", timestamp: "2026-10-05T00:00:30.000Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: quoted }] } },
+        ...carriers(block('Agent "Real" finished'), "2026-10-05T00:01:00.000Z"),
+      ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+      const cards = transcriptPage("claude-transcript", path).turns.flatMap((turn) => turn.parts).filter((part) => part.kind === "task_result");
+      expect(JSON.stringify(cards)).not.toContain("SECRET");
+      expect(cards).toHaveLength(1);
+    });
+
+    it("falls back to the summary's name and leaves out what no file told", () => {
+      const turns = read(carriers(block('Agent "Security review" finished'), "2026-10-05T00:01:00.000Z"));
+      expect(turns).toHaveLength(1);
+      expect(turns[0]?.parts).toEqual([{ kind: "task_result", tasks: [{ id: "a1", title: "Security review", agent: null, model: null, status: "completed", duration_ms: null, turns: null, tool_calls: null, tokens: null, result: "found two issues" }] }]);
+    });
+
+    it("counts a resumed agent's next notification, which carries another tool-use id", () => {
+      const again = block('Agent "Review" finished').replace("toolu_1", "toolu_2");
+      const turns = read([...carriers(block('Agent "Review" finished'), "2026-10-05T00:01:00.000Z"), ...carriers(again, "2026-10-05T00:05:00.000Z")]);
+      expect(turns.map((turn) => turn.ts)).toEqual(["2026-10-05T00:01:00.000Z", "2026-10-05T00:05:00.000Z"]);
+    });
+
+    it("cuts a long answer at the same limit as OmO's", () => {
+      const turns = read(carriers(block('Agent "Long" finished', `<result>${"x".repeat(16_001)}</result>`), "2026-10-05T00:01:00.000Z"));
+      const part = turns[0]?.parts[0];
+      expect(part?.kind === "task_result" ? [part.tasks[0]?.result.length, part.tasks[0]?.result_cut] : part).toEqual([16_000, true]);
+    });
+
+    it("keeps a failed or stopped agent's status and hides a background command's notice", () => {
+      const stopped = block('Agent "Cleanup" was stopped by Claude', "").replace("<status>completed", "<status>killed");
+      const turns = read([...carriers(stopped, "2026-10-05T00:01:00.000Z"), ...carriers(block('Background command "sleep 5" completed (exit code 0)', ""), "2026-10-05T00:02:00.000Z")]);
+      expect(turns).toHaveLength(1);
+      expect(turns[0]?.parts[0]).toMatchObject({ kind: "task_result", tasks: [{ title: "Cleanup", status: "cancelled", result: "" }] });
+    });
+  });
+
   it("preserves array user text, including mixed tool results, without exposing bookkeeping", () => {
     const transcript = [
       { type: "assistant", message: { content: [{ type: "tool_use", id: "t", name: "Read", input: {} }] } },

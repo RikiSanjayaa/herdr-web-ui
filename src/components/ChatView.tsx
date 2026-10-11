@@ -24,6 +24,7 @@ import { isTodoTool, parseTodoAnswer, todoCallSummary, type TodoItem, type TodoS
 import { formatGoalTime, turnGoal, type GoalState, type GoalStatus } from "../lib/goals.ts";
 import { useSettings } from "../lib/settings.ts";
 import { statusEdgeRead } from "../lib/status.ts";
+import { ConversationRefresh } from "../lib/conversationRefresh.ts";
 import { usePageVisible } from "../lib/visibility.ts";
 import { dismissKeyboardOn } from "../lib/keyboard.ts";
 import { useFacesArrived } from "../lib/fontFaces.ts";
@@ -34,8 +35,9 @@ import { machinePath } from "../../shared/machines.ts";
 import { fileUrl } from "../lib/api.ts";
 import { useMachineId } from "../lib/machineContext.tsx";
 import { lineDiff } from "../lib/diff.ts";
-import { formatTokens } from "../lib/compose.ts";
+import { formatTokens, sameMessage } from "../lib/compose.ts";
 import { formatElapsed, taskCallItems, taskResultMarkdown } from "../lib/omoTasks.ts";
+import { sendUserFileCall } from "../lib/sendUserFile.ts";
 
 /** The pane this chat shows, for what its rows fetch on request (a tool call's whole output). */
 const ChatPaneContext = createContext<string | null>(null);
@@ -46,13 +48,21 @@ import { chatIsBlank, type ChatRead } from "../lib/greeting.ts";
 import { currentLocale, useT } from "../lib/i18n.ts";
 
 const TRANSCRIPT_LINES = 400;
-const POLL_MS = 2000;
+const PROMPT_POLL_MS = 2000;
 /** Scrolling this close to the top asks for the page before it. */
 const LOAD_OLDER_PX = 400;
 
 export interface ChatViewProps {
   paneId: string;
   refreshKey: number;
+  /** bumped by a conversation push; coalesced at the former 2s polling cadence */
+  invalidationKey?: number;
+  /** only a mounted, visible chat asks the bridge to watch its native conversation */
+  onConversationWatch?: (paneId: string, enabled: boolean) => void;
+  /** the bridge pushes this pane's transcript changes; without, the chat reads every 2s as before */
+  conversationPushes?: boolean;
+  /** while the chat shows herdr's scrollback, the pane's terminal output invalidates it */
+  onTerminalOutput?: (listener: (() => void) | null) => void;
   /** bumped when a composer message goes out, before the transcript holds it */
   sentKey?: number;
   connected: boolean;
@@ -68,6 +78,8 @@ export interface ChatViewProps {
   onPrompt?: (paneId: string, prompt: InteractivePrompt | null) => void;
   /** with no prompt waiting, the next prompt the agent suggests (Claude's grey input text) */
   onSuggestion?: (paneId: string, suggestion: string | null) => void;
+  /** a cancelled send the agent put back in its input box: the composer fills it again, and it is no sent turn here either */
+  onRestored?: (paneId: string, restored: string | null) => void;
   /** bumped after the composer answered: read the prompt again now */
   promptRefreshKey?: number;
   /** a typed pick of an approval's option, waiting in the card for Confirm */
@@ -231,6 +243,12 @@ function ToolInputView({ part }: { part: ToolPartType }) {
     return <div className="chat-tool-io">{str("file_path") !== undefined && <ToolFile path={str("file_path")!} />}{edits.map((item, index) =>
       <EditDiff key={index} before={typeof item["old_string"] === "string" ? item["old_string"] : ""} after={typeof item["new_string"] === "string" ? item["new_string"] : ""} />)}</div>;
   }
+  // SendUserFile: the files it names, openable where the viewer already opens any other path
+  const sendUserFile = sendUserFileCall(parsed);
+  if (sendUserFile !== null) return <div className="chat-tool-io">
+    {sendUserFile.caption.length > 0 && <p className="chat-tool-io-meta">{sendUserFile.caption}</p>}
+    {sendUserFile.files.map((file, index) => <ToolFile key={`${index}:${file}`} path={file} />)}
+  </div>;
   const editScript = str("input");
   if (editScript !== undefined) return <pre className="chat-tool-io chat-diff">{editScript.split("\n").map((line, index) => <span key={index} className={ompEditLineClass(line)}>{line}{"\n"}</span>)}</pre>;
   const content = str("content");
@@ -527,7 +545,7 @@ function FallbackTurn({ paneId, message }: { paneId: string; message: Transcript
 }
 
 // the app re-renders on every pane-status and poll; an unchanged transcript sits those out
-export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0, connected, ended, agent, agentStatus, onMetadata, onRead, greeted = false, onPrompt, onSuggestion, promptRefreshKey = 0, pendingAnswer = null, onPendingAnswerDone, promptDock = null, onPromptAnswered }: ChatViewProps) {
+export const ChatView = memo(function ChatView({ paneId, refreshKey, invalidationKey = 0, onConversationWatch, conversationPushes = false, onTerminalOutput, sentKey = 0, connected, ended, agent, agentStatus, onMetadata, onRead, greeted = false, onPrompt, onSuggestion, onRestored, promptRefreshKey = 0, pendingAnswer = null, onPendingAnswerDone, promptDock = null, onPromptAnswered }: ChatViewProps) {
   const t = useT();
   const { fetchPaneConversation, fetchPanePromptState, fetchPaneTranscript } = useMachineApi();
   const { settings } = useSettings();
@@ -535,6 +553,9 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
   const visible = usePageVisible();
   /** the answer last laid out: an unchanged poll (a 304) hands back this very object */
   const lastAnswer = useRef<unknown>(null);
+  const [conversationRefresh] = useState(() => new ConversationRefresh());
+  const onMetadataRef = useRef(onMetadata);
+  onMetadataRef.current = onMetadata;
   const [state, setState] = useState<ChatState>(EMPTY_STATE);
   const [error, setError] = useState<string | null>(null);
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
@@ -556,6 +577,11 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
   // where a pane switch or a send upstream could leave it stale
   const onSuggestionRef = useRef(onSuggestion);
   onSuggestionRef.current = onSuggestion;
+  // restored is handed up the same way, and also kept here: while it holds, the send it names
+  // is filtered out of the rendered turns (the terminal shows no sent turn for it either)
+  const onRestoredRef = useRef(onRestored);
+  onRestoredRef.current = onRestored;
+  const [restored, setRestored] = useState<string | null>(null);
   // a read begun before the latest send answers for the turn before it: its suggestion is dropped
   const sentKeyRef = useRef(sentKey);
   sentKeyRef.current = sentKey;
@@ -588,6 +614,8 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
   const heldPage = useRef<ConversationTurn[]>([]);
   const seenSent = useRef(sentKey);
   const seenStatus = useRef<{ pane: string; status: AgentStatus | undefined }>({ pane: paneId, status: agentStatus });
+  const seenConnected = useRef(connected);
+  const seenInvalidation = useRef({ pane: paneId, key: invalidationKey });
 
   const dropOlder = (): void => {
     olderGeneration.current += 1; loadingOlder.current = false;
@@ -597,7 +625,7 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
   useEffect(() => {
     shownPane.current = paneId;
     history.current = undefined; setHistoryId(undefined);
-    stickToBottom.current = true; signature.current = ""; setState(EMPTY_STATE); setNewMessages(false); setAway(false); setLoaded(false); setError(null); setErrorStatus(null); setPrompt(null); setAbandoned(null);
+    stickToBottom.current = true; signature.current = ""; setState(EMPTY_STATE); setNewMessages(false); setAway(false); setLoaded(false); setError(null); setErrorStatus(null); setPrompt(null); setAbandoned(null); setRestored(null);
     dropOlder();
     lastAnswer.current = null;
     setSentOver(null);
@@ -612,9 +640,8 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
     setSentOver(last?.role === "assistant" && agentStatus !== "working" && agentStatus !== "blocked" ? { turn: last, page } : null);
   }, [sentKey, agentStatus]);
 
-  // A turn starts or ends when the status enters or leaves `working`: read now, not at the next
-  // poll. Bumping pollKey re-runs the read effect, whose cleanup cancels the loop that was
-  // running (its answer is dropped, its timer cleared) before the single new loop starts.
+  // Status edges still read immediately, including on a bridge without conversation pushes.
+  // They share the same serialized reader as pushes, sends and the periodic backstop.
   useEffect(() => {
     const seen = seenStatus.current;
     seenStatus.current = { pane: paneId, status: agentStatus };
@@ -624,13 +651,13 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
-    let timer: number | undefined;
     /** The turns between the held start and where the newest page now starts, a page at a time; null when they cannot be joined. */
     const turnsBetween = async (held: string, start: string): Promise<ConversationTurn[] | null> => {
       const pages: ConversationTurn[][] = [];
       let before = start;
       try {
         for (let step = 0; step < 32 && before !== held; step++) {
+          if (cancelled) return null;
           const page = await fetchPaneConversation(paneId, { before, since: held });
           if (typeof page.cursor !== "string") return null;
           pages.unshift(page.turns);
@@ -678,13 +705,13 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
         }
         if (moved.length > 0) setOlder((turns) => [...turns, ...moved]);
         if (heldFrom.current === null) setOlderCursor(conversation.source === "scrollback" ? undefined : conversation.cursor);
-        onMetadata?.(paneId, conversation.source === "scrollback" ? null : conversation.metadata ?? null);
+        onMetadataRef.current?.(paneId, conversation.source === "scrollback" ? null : conversation.metadata ?? null);
         setAbandoned(conversation.abandoned ?? null);
         let next: ChatState;
         if (conversation.source !== "scrollback") next = { source: "conversation", conversationSource: conversation.source, turns: conversation.turns, messages: [], truncated: false };
         else {
           const result = await fetchPaneTranscript(paneId, TRANSCRIPT_LINES);
-          if (cancelled) return;
+          if (cancelled || generation !== olderGeneration.current) return;
           next = { source: "scrollback", turns: [], messages: toTranscriptMessages(result.text).filter((message) => message.role !== "status"), truncated: result.truncated === true };
         }
         const nextSignature = JSON.stringify(next);
@@ -702,13 +729,49 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
         setLoaded(true);
         setError(cause instanceof Error ? cause.message : String(cause));
         setErrorStatus(cause instanceof ApiError ? cause.status : null);
-      } finally {
-        if (!cancelled) timer = window.setTimeout(() => void read(), POLL_MS);
       }
     };
-    void read();
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [paneId, refreshKey, onMetadata, pollKey, visible]);
+    conversationRefresh.setRead(read);
+    onConversationWatch?.(paneId, true);
+    return () => {
+      cancelled = true;
+      // Older pages queued behind this reader must not start for a hidden/replaced screen.
+      olderGeneration.current += 1;
+      loadingOlder.current = false; setOlderState("idle");
+      onConversationWatch?.(paneId, false);
+      conversationRefresh.stop();
+    };
+  }, [paneId, fetchPaneConversation, fetchPaneTranscript, conversationRefresh, visible, onConversationWatch]);
+
+  // Sends, status/history repairs and visibility return read immediately without cancelling
+  // the answer in flight. The reader is installed before this effect requests its first read.
+  useEffect(() => {
+    if (visible) conversationRefresh.refresh();
+  }, [paneId, refreshKey, pollKey, visible, fetchPaneConversation, fetchPaneTranscript, conversationRefresh, onConversationWatch]);
+
+  // Mount/visibility return already read immediately; only a changed push key invalidates.
+  useEffect(() => {
+    const seen = seenInvalidation.current;
+    seenInvalidation.current = { pane: paneId, key: invalidationKey };
+    if (seen.pane === paneId && seen.key !== invalidationKey && visible) conversationRefresh.invalidate();
+  }, [paneId, invalidationKey, visible, conversationRefresh]);
+
+  useEffect(() => { conversationRefresh.setPushes(conversationPushes); }, [conversationPushes, conversationRefresh]);
+
+  // A scrollback stand-in has no native file for the server to watch. Its source is the
+  // pane's own screen, so terminal output is the invalidation, under the same 2s bound.
+  useEffect(() => {
+    if (state.source !== "scrollback" || !visible || onTerminalOutput === undefined) return;
+    onTerminalOutput(() => conversationRefresh.invalidate());
+    return () => onTerminalOutput(null);
+  }, [state.source, visible, onTerminalOutput, conversationRefresh]);
+
+  // Catch writes made offline as soon as the existing socket is connected again.
+  useEffect(() => {
+    const before = seenConnected.current;
+    seenConnected.current = connected;
+    if (connected && !before && visible) conversationRefresh.refresh();
+  }, [connected, visible, conversationRefresh]);
 
   const loadOlder = useCallback(async (): Promise<void> => {
     const node = scroller.current;
@@ -717,34 +780,37 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
     const generation = olderGeneration.current;
     loadingOlder.current = true;
     setOlderState("loading");
-    try {
-      const page = await fetchPaneConversation(paneId, { before });
-      if (shownPane.current !== paneId || olderGeneration.current !== generation) return;
-      if (page.history_id !== history.current) {
-        dropOlder(); setState(EMPTY_STATE); setLoaded(false); signature.current = ""; lastAnswer.current = null;
-        setPollKey((key) => key + 1); return;
+    await conversationRefresh.page(async () => {
+      try {
+        if (shownPane.current !== paneId || olderGeneration.current !== generation) return;
+        const page = await fetchPaneConversation(paneId, { before });
+        if (shownPane.current !== paneId || olderGeneration.current !== generation) return;
+        if (page.history_id !== history.current) {
+          dropOlder(); setState(EMPTY_STATE); setLoaded(false); signature.current = ""; lastAnswer.current = null;
+          setPollKey((key) => key + 1); return;
+        }
+        // a bridge without pages answers with its newest turns: nothing older to add
+        if (page.source === "scrollback" || page.cursor === undefined) { setOlderCursor(undefined); setOlderState("idle"); return; }
+        const first = heldFrom.current === null;
+        heldFrom.current ??= before;
+        prepended.current = { top: node.scrollTop, height: node.scrollHeight };
+        setOlder((turns) => [...page.turns, ...turns]);
+        setOlderCursor(page.cursor);
+        setOlderState("idle");
+        // the newest page may have slid since it was read: poll it from the held start now
+        if (first) setPollKey((key) => key + 1);
+      } catch (cause) {
+        if (shownPane.current !== paneId || olderGeneration.current !== generation) return;
+        if (cause instanceof ApiError && cause.status === 409) {
+          dropOlder(); setState(EMPTY_STATE); setLoaded(false); signature.current = ""; lastAnswer.current = null;
+          setPollKey((key) => key + 1);
+        }
+        else setOlderState("failed");
+      } finally {
+        if (olderGeneration.current === generation) loadingOlder.current = false;
       }
-      // a bridge without pages answers with its newest turns: nothing older to add
-      if (page.source === "scrollback" || page.cursor === undefined) { setOlderCursor(undefined); setOlderState("idle"); return; }
-      const first = heldFrom.current === null;
-      heldFrom.current ??= before;
-      prepended.current = { top: node.scrollTop, height: node.scrollHeight };
-      setOlder((turns) => [...page.turns, ...turns]);
-      setOlderCursor(page.cursor);
-      setOlderState("idle");
-      // the newest page may have slid since it was read: poll it from the held start now
-      if (first) setPollKey((key) => key + 1);
-    } catch (cause) {
-      if (shownPane.current !== paneId || olderGeneration.current !== generation) return;
-      if (cause instanceof ApiError && cause.status === 409) {
-        dropOlder(); setState(EMPTY_STATE); setLoaded(false); signature.current = ""; lastAnswer.current = null;
-        setPollKey((key) => key + 1);
-      }
-      else setOlderState("failed");
-    } finally {
-      if (olderGeneration.current === generation) loadingOlder.current = false;
-    }
-  }, [fetchPaneConversation, olderCursor, paneId]);
+    });
+  }, [fetchPaneConversation, olderCursor, paneId, conversationRefresh]);
 
   // Older turns went in above the reader: keep the same turns under their eyes.
   useLayoutEffect(() => {
@@ -755,11 +821,11 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
     node.scrollTop = anchor.top + (node.scrollHeight - anchor.height);
   }, [older]);
 
-  // A new Codex TUI can show its directory-trust menu while herdr still reports
-  // idle. The visible prompt, not the status badge, decides whether to offer answers.
+  // Prompts belong to the visible screen, not the native transcript: a Codex directory-trust
+  // menu can appear while idle without any file mutation. Keep their independent 2s poll.
   const pollPrompt = connected && !ended && agent !== null;
   useEffect(() => {
-    if (!pollPrompt) { setPrompt(null); onSuggestionRef.current?.(paneId, null); return; }
+    if (!pollPrompt) { setPrompt(null); setRestored(null); onSuggestionRef.current?.(paneId, null); onRestoredRef.current?.(paneId, null); return; }
     if (!visible) return;
     let cancelled = false;
     let timer = 0;
@@ -770,11 +836,15 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
         const next = await fetchPanePromptState(paneId);
         if (!cancelled) {
           setPrompt((current) => current?.id === next.prompt?.id ? current : next.prompt);
-          if (sentKeyRef.current === sent) onSuggestionRef.current?.(paneId, next.suggestion);
+          if (sentKeyRef.current === sent) {
+            onSuggestionRef.current?.(paneId, next.suggestion);
+            setRestored(next.restored);
+            onRestoredRef.current?.(paneId, next.restored);
+          }
         }
       }
-      catch { if (!cancelled) { setPrompt(null); onSuggestionRef.current?.(paneId, null); } }
-      finally { if (!cancelled) timer = window.setTimeout(() => void readPrompt(), POLL_MS); }
+      catch { if (!cancelled) { setPrompt(null); setRestored(null); onSuggestionRef.current?.(paneId, null); onRestoredRef.current?.(paneId, null); } }
+      finally { if (!cancelled) timer = window.setTimeout(() => void readPrompt(), PROMPT_POLL_MS); }
     };
     void readPrompt();
     return () => { cancelled = true; window.clearTimeout(timer); };
@@ -785,8 +855,8 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
     return () => onPrompt?.(paneId, null);
   }, [onPrompt, paneId, prompt]);
 
-  // a pane left behind keeps no suggestion
-  useEffect(() => () => onSuggestionRef.current?.(paneId, null), [paneId]);
+  // a pane left behind keeps no suggestion and no restored send
+  useEffect(() => () => { onSuggestionRef.current?.(paneId, null); onRestoredRef.current?.(paneId, null); }, [paneId]);
 
   // away from the page, the prompt is not read: it can be answered in the terminal and asked
   // again unseen, so a typed pick waiting for Confirm does not outlive the page being hidden
@@ -854,6 +924,15 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
     stickToBottom.current = true; setNewMessages(false); setAway(false);
   };
   const turns = useMemo(() => older.length > 0 ? [...older, ...state.turns] : state.turns, [older, state.turns]);
+  // A cancelled send back in the agent's input box is no sent turn: the transcript still holds it
+  // (empty, blank, held and onRead keep the turns as read), but the rendered list drops it while
+  // the last turn is that very send — matching the terminal, which shows it only as typed text.
+  const shownTurns = useMemo(() => {
+    const last = turns[turns.length - 1];
+    if (restored === null || last?.role !== "user") return turns;
+    const sent = last.parts.filter((part): part is Extract<ConversationPart, { kind: "text" }> => part.kind === "text").map((part) => part.text).join("\n");
+    return sameMessage(sent, restored) ? turns.slice(0, -1) : turns;
+  }, [turns, restored]);
   heldPage.current = state.turns;
   const finishedBeforeSend = sentOver !== null && sentOver.page === state.turns ? sentOver.turn : null;
   const empty = state.source === "conversation" ? turns.length === 0 : state.messages.length === 0;
@@ -892,8 +971,8 @@ export const ChatView = memo(function ChatView({ paneId, refreshKey, sentKey = 0
       )}
       {state.source === "conversation" && olderCursor === null && older.length > 0 && <p className="chat-endcap">{t("beginning of conversation")}</p>}
       {state.source === "conversation"
-        ? turns.map((turn, index) => {
-            const last = index === turns.length - 1;
+        ? shownTurns.map((turn, index) => {
+            const last = index === shownTurns.length - 1;
             const live = isLiveWorkTurn(turn, last, agentStatus, finishedBeforeSend);
             return <RenderBoundary key={`${paneId}:${historyId ?? ""}:${turn.role}:${turn.ts ?? index}`} resetKey={turnRevision(turn)} fallback={() => <p className="chat-inline-state chat-inline-error">{t("This message can't be shown here. The terminal has it.")}</p>}>
               <Turn paneId={paneId} turn={turn} live={live} waiting={isWaitingWorkTurn(live, agentStatus)} showThinking={settings.showThinking} />

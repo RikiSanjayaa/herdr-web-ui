@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createServer } from "./index.ts";
+import { ConversationMonitor } from "./conversation-monitor.ts";
 import { herdrRpc, sessionSnapshot, workspaceClose, workspaceCreate } from "./herdr/client.ts";
 import type { ConversationPart, ConversationResponse } from "../shared/protocol.ts";
 import { forgetTranscriptState } from "./conversation.ts";
@@ -188,6 +189,31 @@ it("changes the ETag when metadata changes in WAL without appending a message", 
     expect(after.headers.get("etag")).not.toBe(etag);
     expect((await after.json() as ConversationResponse).metadata).toEqual({ model: "new-model", reasoning_effort: "high" });
   } finally { db.close(); }
+});
+
+it("notifies a watched Hermes conversation when its SQLite WAL changes", async () => {
+  const changes: string[] = [];
+  const monitor = new ConversationMonitor((id, signature) => {
+    if (id === paneId) changes.push(signature);
+  }, undefined, undefined, undefined, root);
+  const until = async (count: number): Promise<void> => {
+    const deadline = Date.now() + 5_000;
+    while (changes.length < count) {
+      if (Date.now() >= deadline) throw new Error("Hermes conversation change was not observed");
+      await Bun.sleep(20);
+    }
+  };
+
+  monitor.watch(paneId);
+  try {
+    await until(1);
+    const db = new Database(dbPath);
+    try {
+      db.exec("PRAGMA journal_mode=WAL");
+      db.query("UPDATE sessions SET model = ? WHERE id = ?").run("watched-model", sessionId);
+      await until(2);
+    } finally { db.close(); }
+  } finally { monitor.stop(); }
 });
 
 it("loads the whole output of a tool result cut in the conversation page", async () => {

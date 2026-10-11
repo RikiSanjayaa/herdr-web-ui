@@ -51,10 +51,18 @@ export class HerdrSocket {
   private readonly outputSeen = new Set<string>();
   private readonly inputReady = new Set<string>();
   private readonly attached = new Map<string, AttachState>();
+  /** panes this tab views read-only while out of use (feature "watch"), at the grid it asked for; replayed after each snapshot */
+  private readonly watched = new Map<string, { cols: number; rows: number }>();
+  /** Panes whose mounted, visible chat asks for transcript invalidations. The server drops interest
+   * with the attachment, so each attach of a pane listed here (a reconnect's, or a tab back in use
+   * after letting go of it) asks again; only the chat taking its interest back removes it. */
+  private readonly conversationWanted = new Set<string>();
   private retries = 0;
   private reconnectTimer: number | null = null;
   private disposed = false;
   private mode: ClientRole = "interact";
+  /** whether the page is in use (`presence`), as last told; null until the page says */
+  private presence: boolean | null = null;
   private outputStopped = false;
   /** what the connected server listed in its snapshot: empty until it arrives, and on older bridges */
   private features = new Set<ServerFeature>();
@@ -95,6 +103,8 @@ export class HerdrSocket {
       // the reconnect would leave the server on the stale role and no ack would ever
       // arrive - the UI would stay stuck in the old role while the header pill lies
       this.rawSend({ type: "role", mode: this.mode });
+      // a new connection is a new client to the server: it has to hear again whether the page is in use
+      if (this.presence !== null) this.rawSend({ type: "presence", active: this.presence });
       for (const [paneId, state] of this.attached) {
         this.rawSend({ type: "attach", pane_id: paneId, cols: state.cols, rows: state.rows, flow_control: "ack", ...(state.keepSize ? { keep_size: true } : {}) });
       }
@@ -112,12 +122,28 @@ export class HerdrSocket {
       // The server can force this connection to observe. Apply its authority before
       // waking pending submits or notifying UI handlers about the acknowledged role.
       if (message.type === "role-ack") this.mode = message.mode;
+      // a server without the read-only view (an older bridge after a reconnect) ends this tab's watches
+      let unwatched: string[] = [];
       if (message.type === "snapshot") {
         this.features = new Set(message.features ?? []);
         this.snapshotKnown = true;
         if (!this.features.has("input-ready")) for (const pane of this.outputSeen) if (this.attached.has(pane)) this.inputReady.add(pane);
+        // Capabilities arrive after open's role/attach replay. Restore only current interest,
+        // never send an unknown frame to an older bridge or replay a hidden/detached chat.
+        if (this.features.has("conversation-watch")) {
+          for (const paneId of this.attached.keys()) {
+            if (this.conversationWanted.has(paneId)) this.rawSend({ type: "conversation-watch", pane_id: paneId, enabled: true });
+          }
+        }
+        if (this.features.has("watch")) {
+          for (const [paneId, grid] of this.watched) this.rawSend({ type: "watch", pane_id: paneId, cols: grid.cols, rows: grid.rows });
+        } else {
+          unwatched = [...this.watched.keys()];
+          this.watched.clear();
+        }
         this.markSnapshot();
       }
+      if (message.type === "watch-end") this.watched.delete(message.pane_id);
       if (message.type === "pty-data") this.outputSeen.add(message.pane_id);
       if ((message.type === "input-ready" && message.ready !== false) || (message.type === "pty-data" && this.snapshotKnown && !this.features.has("input-ready"))) {
         if (this.attached.has(message.pane_id)) this.inputReady.add(message.pane_id);
@@ -143,6 +169,7 @@ export class HerdrSocket {
       }
       // A terminal/parser failure is not malformed JSON and must not disappear.
       this.emit(message);
+      for (const paneId of unwatched) this.emit({ type: "watch-end", pane_id: paneId });
     });
 
     socket.addEventListener("close", (event) => {
@@ -205,10 +232,29 @@ export class HerdrSocket {
     this.inputReady.delete(paneId);
     this.attached.set(paneId, { cols, rows, keepSize });
     this.send({ type: "attach", pane_id: paneId, cols, rows, flow_control: "ack", ...(keepSize ? { keep_size: true } : {}) });
+    if (this.conversationWanted.has(paneId) && this.features.has("conversation-watch")) {
+      this.send({ type: "conversation-watch", pane_id: paneId, enabled: true });
+    }
     if (this.outputStopped) {
       this.outputStopped = false;
       this.connect();
     }
+  }
+
+  /** Retained control state, not queued input: kept across detach, asked again by the next attach. */
+  watchConversation(paneId: string, enabled: boolean): void {
+    if (this.conversationWanted.has(paneId) === enabled) return;
+    if (enabled) this.conversationWanted.add(paneId);
+    else this.conversationWanted.delete(paneId);
+    // a detached pane has no interest on the server: its next attach asks
+    if (this.attached.has(paneId) && this.features.has("conversation-watch")) {
+      this.send({ type: "conversation-watch", pane_id: paneId, enabled });
+    }
+  }
+
+  /** Whether this connection's bridge pushes transcript changes to a watching chat. */
+  conversationPushes(): boolean {
+    return this.connected && this.features.has("conversation-watch");
   }
 
   /** Capture connection AND subscription before xterm's asynchronous write. Never queue ACKs. */
@@ -231,16 +277,33 @@ export class HerdrSocket {
     this.send({ type: "detach", pane_id: paneId });
   }
 
+  /**
+   * Views the pane read-only at this grid, leaving its size to herdr's own window; replayed after
+   * a reconnect's snapshot. False when the server cannot (no "watch" in its snapshot): the tab stays paused.
+   */
+  watch(paneId: string, cols: number, rows: number): boolean {
+    if (this.snapshotKnown && !this.features.has("watch")) return false;
+    this.watched.set(paneId, { cols, rows });
+    // before the snapshot, the snapshot handler sends it
+    if (this.connected && this.snapshotKnown) this.rawSend({ type: "watch", pane_id: paneId, cols, rows });
+    return true;
+  }
+
+  unwatch(paneId: string): void {
+    if (this.watched.delete(paneId) && this.connected && this.features.has("watch")) this.rawSend({ type: "unwatch", pane_id: paneId });
+  }
+
   resize(paneId: string, cols: number, rows: number, force = false): void {
     const state = this.attached.get(paneId);
-    if (state) {
-      // skip only redundant resizes of OUR OWN geometry: a force resize re-asserts
-      // it after another client resized the shared pty (see PaneTerminal refit)
-      if (!force && state.cols === cols && state.rows === rows) return;
-      state.cols = cols;
-      state.rows = rows;
-      state.keepSize = false;
-    }
+    // a pane this tab let go of (PaneTerminal's release) is sized by whoever holds it: the server
+    // would apply the resize to their attach
+    if (!state) return;
+    // skip only redundant resizes of OUR OWN geometry: a force resize re-asserts
+    // it after another client resized the shared pty (see PaneTerminal refit)
+    if (!force && state.cols === cols && state.rows === rows) return;
+    state.cols = cols;
+    state.rows = rows;
+    state.keepSize = false;
     this.send({ type: "resize", pane_id: paneId, cols, rows });
   }
 
@@ -260,6 +323,13 @@ export class HerdrSocket {
   keepSize(paneId: string): void {
     const state = this.attached.get(paneId);
     if (state) state.keepSize = true;
+  }
+
+  /** Whether the page is in use (visible and focused): the server holds web push while one is. Replays on reconnect. */
+  setPresence(active: boolean): void {
+    if (this.presence === active) return;
+    this.presence = active;
+    if (this.connected) this.rawSend({ type: "presence", active });
   }
 
   /** Sets the connection's role. Not queued: the role replays before the attaches on reconnect. */

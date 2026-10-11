@@ -26,15 +26,30 @@ export interface NewSessionDialogProps {
   /** set, the dialog makes a tab in that workspace instead of a workspace */
   tab?: NewTabTarget | null;
   onClose: () => void;
-  onCreated: (paneId: string) => void;
+  /** `agentStarted`: the pane runs the agent asked for, so it opens in an agent's lens */
+  onCreated: (paneId: string, agentStarted: boolean) => void;
+  /** fields a link fills for this opening (`?new=`, lib/deepLink.ts); an agent herdr does not offer is left out */
+  prefill?: DialogFields | null;
+  /** what the fields say, a moment after they change, for the address */
+  onDraft?: (fields: DialogFields) => void;
 }
+
+export interface DialogFields {
+  cwd: string | null;
+  name: string | null;
+  /** "" is a shell; null keeps the last agent picked */
+  agent: string | null;
+}
+
+/** how long the fields rest before the address follows them: Safari refuses a burst of history writes */
+const DRAFT_MS = 400;
 
 function directoryBasename(value: string): string {
   const trimmed = value.replace(/\/+$/, "");
   return trimmed.split("/").pop() ?? "";
 }
 
-export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCreated, machineName }: NewSessionDialogProps) {
+export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCreated, machineName, prefill = null, onDraft }: NewSessionDialogProps) {
   const t = useT();
   const machineId = useMachineId();
   const { createTab, createWorkspace, fetchAgentKinds } = useMachineApi();
@@ -50,23 +65,28 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   const surface = useFocusTrap<HTMLFormElement>(open, { initialFocus: firstFieldRef });
   const defaultCwdRef = useRef(defaultCwd);
   defaultCwdRef.current = defaultCwd;
+  const prefillRef = useRef(prefill);
+  prefillRef.current = prefill;
 
   useEffect(() => {
     if (!open) return;
-    setCwd(defaultCwdRef.current ?? "");
-    setName("");
+    const filled = prefillRef.current;
+    setCwd(filled?.cwd ?? defaultCwdRef.current ?? "");
+    setName(filled?.name ?? "");
     setError(null);
     setPending(false);
     setCreatedPaneId(null);
     setBrowsing(false);
-    const stored = rememberedAgent();
+    const remembered = rememberedAgent();
+    const stored = filled?.agent ?? remembered;
     setAgentKind(stored);
     let cancelled = false;
     void fetchAgentKinds()
       .then((next) => {
         if (cancelled) return;
         setAgents(next);
-        if (stored && !next.some((agent) => agent.kind === stored)) setAgentKind("");
+        // a linked agent herdr does not offer gives way to the last one picked, as an unknown remembered one does to a shell
+        if (stored && !next.some((agent) => agent.kind === stored)) setAgentKind(stored !== remembered && next.some((agent) => agent.kind === remembered) ? remembered : "");
       })
       .catch((reason: unknown) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
@@ -75,6 +95,12 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
       cancelled = true;
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!open || !onDraft) return;
+    const timer = window.setTimeout(() => onDraft({ cwd: cwd || null, name: name || null, agent: agentKind }), DRAFT_MS);
+    return () => window.clearTimeout(timer);
+  }, [open, onDraft, cwd, name, agentKind]);
 
   useEffect(() => {
     if (!open) return;
@@ -97,7 +123,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (pending) return;
-    if (createdPaneId !== null) { onCreated(createdPaneId); return; }
+    if (createdPaneId !== null) { onCreated(createdPaneId, false); return; }
     setPending(true);
     setError(null);
     try {
@@ -116,7 +142,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
       // the dialog closes on this: left pending, its next opening would start a frame with the
       // fields disabled and Escape ignored, until the open effect's reset has rendered
       setPending(false);
-      onCreated(result.pane_id);
+      onCreated(result.pane_id, agentKind !== "" && result.agent_started !== false);
     } catch (reason: unknown) {
       setPending(false);
       if (reason instanceof ApiError && reason.code === "invalid_cwd") setError(t("Directory not found"));

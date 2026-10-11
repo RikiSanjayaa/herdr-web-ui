@@ -54,11 +54,33 @@
    positioned against THIS, never against the stack — the composer and key bar
    below keep their rows no matter which lens is on */
 .terminal-surface {
+  --terminal-history-gutter: var(--space-3);
   position: relative;
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/* A pinch's target size floats above xterm, without taking rows or touches. */
+.terminal-font-size {
+  position: absolute;
+  top: var(--space-3);
+  left: 50%;
+  z-index: var(--z-banner);
+  transform: translateX(-50%);
+  padding: var(--space-1) var(--space-2);
+  border: var(--hairline) solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-base);
+  white-space: nowrap;
+  box-shadow: var(--shadow-card);
+  pointer-events: none;
 }
 
 /* Under the chat lens a prompt card and the held messages can take the stack's whole height (a
@@ -297,3 +319,6 @@
 .terminal-stack.is-chat .pane-terminal {
   content-visibility: hidden;
 }
+
+.pane-terminal.has-viewport-tools { width: calc(100% - var(--terminal-history-gutter)); }
+@media (pointer: coarse) { .terminal-surface { --terminal-history-gutter: var(--space-6); } }

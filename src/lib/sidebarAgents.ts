@@ -97,6 +97,8 @@ export interface AgentContextParts {
   agentLabel: string | null;
   /** the row's first line; an agent named like it is not said twice */
   title: string;
+  /** the agent the row's mark draws, null for the generic mark: a kind the mark already says is not written again */
+  markAgent: string | null;
   /** null with a single PC: herdr does not name a lone machine either */
   machineName: string | null;
   workspaceLabel: string;
@@ -104,11 +106,11 @@ export interface AgentContextParts {
 }
 
 /** An agent row's second line: who it is, then where it runs, without repeating a word the row already says. */
-export function agentContext({ agentLabel, title, machineName, workspaceLabel, tabName }: AgentContextParts): string[] {
+export function agentContext({ agentLabel, title, markAgent, machineName, workspaceLabel, tabName }: AgentContextParts): string[] {
   const agent = nonblank(agentLabel);
   const tab = nonblank(tabName);
   return [
-    agent && agent !== title.trim() ? agent : null,
+    agent && agent !== title.trim() && agent.toLowerCase() !== markAgent?.toLowerCase() ? agent : null,
     nonblank(machineName),
     workspaceLabel,
     tab && tab !== workspaceLabel ? tab : null,
