@@ -543,6 +543,7 @@ export const KO: Record<string, string> = {
   "Copied": "복사됨",
   "Couldn't copy. Select the text and copy it manually.": "복사하지 못했습니다. 텍스트를 선택해 직접 복사하세요.",
   "Output": "출력",
+  "Arguments omitted (too large)": "인자가 너무 커서 생략됨",
   "thinking": "생각",
   "Working…": "작업 중…",
   "Worked for {duration}": "{duration} 작업",

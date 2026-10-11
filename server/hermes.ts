@@ -18,6 +18,7 @@ export interface HermesMessageRow {
   content: string | null;
   tool_call_id: string | null;
   tool_calls: string | null;
+  tool_calls_bytes?: number | null;
   tool_name: string | null;
   reasoning: string | null;
   timestamp: number;
@@ -411,6 +412,7 @@ function hermesRowsBefore(db: Database, sessionId: string, before: number, floor
     `SELECT id, role,
        CASE WHEN role = 'tool' THEN substr(content, 1, ?) ELSE substr(content, 1, ?) END AS content,
        tool_call_id, CASE WHEN length(CAST(tool_calls AS BLOB)) <= ? THEN tool_calls ELSE NULL END AS tool_calls,
+       length(CAST(tool_calls AS BLOB)) AS tool_calls_bytes,
        tool_name, substr(reasoning, 1, ?) AS reasoning, length(reasoning) AS reasoning_chars, timestamp,
        CASE WHEN role = 'tool' THEN length(content) ELSE NULL END AS output_size,
        CASE WHEN role != 'tool' THEN length(CAST(content AS BLOB)) ELSE NULL END AS content_bytes
@@ -471,6 +473,7 @@ function hermesRowsFrom(db: Database, sessionId: string, start: number): HermesM
     `SELECT id, role,
        CASE WHEN role = 'tool' THEN substr(content, 1, ?) ELSE substr(content, 1, ?) END AS content,
        tool_call_id, CASE WHEN length(CAST(tool_calls AS BLOB)) <= ? THEN tool_calls ELSE NULL END AS tool_calls,
+       length(CAST(tool_calls AS BLOB)) AS tool_calls_bytes,
        tool_name, substr(reasoning, 1, ?) AS reasoning, length(reasoning) AS reasoning_chars, timestamp,
        CASE WHEN role = 'tool' THEN length(content) ELSE NULL END AS output_size,
        CASE WHEN role != 'tool' THEN length(CAST(content AS BLOB)) ELSE NULL END AS content_bytes
@@ -680,6 +683,8 @@ export function parseHermesRows(rows: readonly HermesMessageRow[], identity?: st
               }
             }
           } catch { /* malformed tool_calls json */ }
+        } else if ((row.tool_calls_bytes ?? 0) > PAGE_TOOL_CALLS_BYTES) {
+          turn.parts.push({ kind: "tool", name: "tool", summary: "", input: "", output: "", arguments_omitted: true });
         }
 
         if (typeof row.content === "string" && row.content.trim().length > 0) {

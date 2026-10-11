@@ -547,6 +547,7 @@ export const ZH: Record<string, string> = {
   "Copied": "已复制",
   "Couldn't copy. Select the text and copy it manually.": "无法复制。请选中文本并手动复制。",
   "Output": "输出",
+  "Arguments omitted (too large)": "参数过大，已省略",
   "thinking": "思考",
   "Working…": "正在工作…",
   "Worked for {duration}": "工作了 {duration}",

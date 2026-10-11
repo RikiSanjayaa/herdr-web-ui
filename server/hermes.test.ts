@@ -596,7 +596,9 @@ describe("hermesConversationPage SQLite integration", () => {
     const thinking = newest.turns[0]!.parts.find((part) => part.kind === "thinking");
     expect(thinking?.kind === "thinking" ? thinking.text.endsWith("\n… trimmed") : false).toBe(true);
     expect(thinking?.kind === "thinking" ? Buffer.byteLength(thinking.text, "utf8") : 0).toBeLessThanOrEqual(TRANSCRIPT_WINDOW_BYTES);
-    expect(newest.turns[0]!.parts.some((part) => part.kind === "tool")).toBe(false);
+    expect(newest.turns[0]!.parts.find((part) => part.kind === "tool")).toMatchObject({
+      kind: "tool", name: "tool", input: "", output: "", arguments_omitted: true,
+    });
     expect(hermesConversationPage("large-fields", dbPath, { from: newest.cursor! }).turns[0]!.parts).toEqual(newest.turns[0]!.parts);
   });
 

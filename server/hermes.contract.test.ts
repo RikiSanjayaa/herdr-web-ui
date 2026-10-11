@@ -243,6 +243,19 @@ it("loads the whole output of a tool result cut in the conversation page", async
   expect(bareResp.status).toBe(404);
 });
 
+it("marks oversized Hermes tool-call arguments in the conversation response", async () => {
+  const db = new Database(dbPath);
+  try {
+    db.query("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES (?, 'assistant', ?, 1700000600)")
+      .run(sessionId, JSON.stringify([{ id: "oversized-call", function: { name: "bash", arguments: "x".repeat(4 * 1024 * 1024) } }]));
+  } finally { db.close(); }
+
+  const conversation = await read();
+  expect(conversation.turns.flatMap((turn) => turn.parts).find((part) => part.kind === "tool" && part.arguments_omitted)).toMatchObject({
+    kind: "tool", name: "tool", input: "", output: "", arguments_omitted: true,
+  });
+});
+
 it("falls back to scrollback when the Hermes database is corrupt or incompatible", async () => {
   const corruptHome = join(root, "corrupt-home");
   mkdirSync(corruptHome, { recursive: true });

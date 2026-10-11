@@ -545,6 +545,7 @@ export const JA: Record<string, string> = {
   "Copied": "コピーしました",
   "Couldn't copy. Select the text and copy it manually.": "コピーできませんでした。テキストを選択して手動でコピーしてください。",
   "Output": "出力",
+  "Arguments omitted (too large)": "引数が大きすぎるため省略しました",
   "thinking": "思考",
   "Working…": "作業中…",
   "Worked for {duration}": "{duration} 作業しました",
