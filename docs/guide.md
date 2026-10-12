@@ -156,6 +156,17 @@ Every agent herdr runs shows up with its live status, terminal and alerts. The c
 | **Antigravity (agy)** | **Experimental; macOS untested.** Native ledger, selected by the running process’s held conversation lock. Linux native-tested; Windows uses terminal text. See [Agy behavior and limits](agy-chat.md). | — use Terminal |
 | **Anything else** | The terminal's text | — use Terminal |
 
+Hermes command suggestions include `/retry` and eligible individual skills from the selected
+native process's profile. Other built-ins still require Terminal because their output or menus
+are not represented in Chat. Discovery reads installed native declarations without executing
+Python. Unresolved process identity exposes no profile resources. Project skills require both
+native project trust and a current safe or caution scan attestation; ambiguous modern skill
+identifiers and unverified app requirements are omitted. Ink transcript lookup accepts only a
+unique native session bound to the pane's gateway PID and process lifetime.
+Recognized single-skill invocations show the actual user request and a skill chip instead of
+the expanded skill document. A bare invocation shows only the chip. This changes presentation,
+not Hermes's stored messages or model input. Unknown, quoted and clipped envelopes remain raw text.
+
 Devin sessions are never selected by directory or recency alone. A plain `devin` shows the
 terminal text, since herdr does not report its session without its Devin integration; a session
 started with `devin --resume <id>` (or `-r <id>`, as Devin suggests when it exits) is a chat.

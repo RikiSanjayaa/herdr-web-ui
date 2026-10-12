@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { piAgentDir } from "./pi-models.ts";
 import { join, relative, sep } from "node:path";
+import { hermesCommands, HERMES_BUILTIN_COMMANDS, type HermesCommandContext } from "./hermes-commands.ts";
 
 import type { SlashCommand } from "../shared/protocol.ts";
 
@@ -14,6 +15,7 @@ const BUILTINS: Record<string, readonly string[]> = {
   // chat would walk a reader into a state only the terminal lens can leave. Navigating stays in the
   // terminal; the chat's place is the abandoned-turns marker, which says where a /tree left off
   pi: ["settings", "model", "thinking", "scoped-models", "login", "logout", "llama", "new", "resume", "name", "session", "fork", "clone", "compact", "import", "copy", "export", "share", "bug", "trust", "reload", "hotkeys", "changelog", "quit"],
+  hermes: HERMES_BUILTIN_COMMANDS.map((c) => c.name),
 };
 
 /** pi states what each command opens or does, in its own words, read off its palette. */
@@ -142,8 +144,16 @@ function piTemplates(root: string, source: SlashCommand["source"]): SlashCommand
   return result;
 }
 
-export function paneCommands(agent: string | null | undefined, cwd: string | null | undefined, home = process.env.HOME ?? ""): SlashCommand[] {
+export function paneCommands(
+  agent: string | null | undefined,
+  cwd: string | null | undefined,
+  home = process.env.HOME ?? "",
+  options: { hermesContext?: HermesCommandContext | null } = {},
+): SlashCommand[] {
   if (!agent || !(agent in BUILTINS)) return [];
+  if (agent === "hermes") {
+    return hermesCommands(cwd, options.hermesContext);
+  }
   const commands: SlashCommand[] = (BUILTINS[agent] ?? []).map((name) => ({ name, description: (agent === "pi" ? PI_DESCRIPTIONS[name] : undefined) ?? DESCRIPTIONS[name] ?? `Run /${name}`, source: "builtin" }));
   if (agent === "claude") {
     commands.push(...customCommands(join(home, ".claude", "commands"), "user"));

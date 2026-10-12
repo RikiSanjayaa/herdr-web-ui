@@ -65,6 +65,7 @@ export interface ComposerProps {
   /** the pane's turn ended on work still running in the background: its word is BG, not DONE (lib/status.ts paneStatus) */
   backgroundWait?: boolean;
   metadata?: ConversationMetadata | null;
+  cwd?: string | null;
   /** replaces the placeholder: how a message answers the agent's waiting prompt */
   answerHint?: string | null;
   /** what the agent suggests typing next (Claude's grey input text): the placeholder, taken with Tab */
@@ -106,8 +107,18 @@ export const SOURCE_LABEL: Record<SlashCommand["source"], string> = {
   plugin: "Plugins",
 };
 
-type CommandCacheEntry = { loadedAt: number; commands: SlashCommand[] };
+type CommandCacheEntry = { loadedAt: number; commands: SlashCommand[]; agent?: string | null; cwd?: string | null };
 const commandCache = new Map<string, CommandCacheEntry>();
+
+export function forgetCommandCache(paneId?: string): void {
+  if (paneId) {
+    for (const key of commandCache.keys()) {
+      if (key.endsWith(`:${paneId}`) || key === paneId) commandCache.delete(key);
+    }
+  } else {
+    commandCache.clear();
+  }
+}
 let attachmentSequence = 0;
 
 type Attachment = {
@@ -155,11 +166,25 @@ function composerHeightLimit(): number {
   return Math.min(COMPOSER_HEIGHT_MAX, Math.floor(viewport / 2));
 }
 
-async function cachedPaneCommands(paneId: string, machineId: string, fetchCommands: (pane: string) => Promise<SlashCommand[]>): Promise<SlashCommand[]> {
-  const cached = commandCache.get(paneStorageId(machineId, paneId));
-  if (cached && Date.now() - cached.loadedAt < COMMAND_CACHE_MS) return cached.commands;
+async function cachedPaneCommands(
+  paneId: string,
+  machineId: string,
+  fetchCommands: (pane: string) => Promise<SlashCommand[]>,
+  agent?: string | null,
+  cwd?: string | null,
+): Promise<SlashCommand[]> {
+  const key = paneStorageId(machineId, paneId);
+  const cached = commandCache.get(key);
+  if (
+    cached &&
+    Date.now() - cached.loadedAt < COMMAND_CACHE_MS &&
+    cached.agent === (agent ?? null) &&
+    (cwd === undefined || cached.cwd === (cwd ?? null))
+  ) {
+    return cached.commands;
+  }
   const commands = await fetchCommands(paneId);
-  commandCache.set(paneStorageId(machineId, paneId), { loadedAt: Date.now(), commands });
+  commandCache.set(key, { loadedAt: Date.now(), commands, agent: agent ?? null, cwd: cwd ?? null });
   return commands;
 }
 
@@ -229,6 +254,7 @@ export function Composer({
   plan = null,
   backgroundWait = false,
   metadata,
+  cwd = null,
   answerHint = null,
   suggestion = null,
   restored = null,
@@ -337,7 +363,7 @@ export function Composer({
 
   useEffect(() => {
     let live = true;
-    void cachedPaneCommands(paneId, machineId, fetchPaneCommands)
+    void cachedPaneCommands(paneId, machineId, fetchPaneCommands, agent, cwd)
       .then((next) => {
         if (live) setCommands(next);
       })
@@ -347,7 +373,7 @@ export function Composer({
     return () => {
       live = false;
     };
-  }, [paneId]);
+  }, [paneId, machineId, agent, cwd]);
 
   useEffect(() => {
     const request = ++fileRequest.current;

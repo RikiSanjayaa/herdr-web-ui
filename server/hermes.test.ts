@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  hermesRuntimeSession,
   defaultHermesHome,
   forgetHermesTranscriptState,
   hermesBreadcrumbSession,
@@ -21,6 +22,49 @@ import {
 import { ConversationNotStarted, ConversationUnavailable, HistoryChanged, TRANSCRIPT_WINDOW_BYTES, type RecognizedConversation } from "./conversation.ts";
 import type { ConversationPart, ConversationTurn } from "../shared/protocol.ts";
 import { toolSummary } from "./transcript-records.ts";
+import { processStartedAt } from "./process-start.ts";
+
+describe("Hermes skill presentation", () => {
+  const header = '[IMPORTANT: The user has invoked the "review" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]';
+  const scaffold = `${header}\n\nPrivate skill instructions\n\n[Skill directory: /skills/review]\nResolve any relative paths in this skill (e.g. scripts/foo.js) against that directory.`;
+  const parse = (content: string) => parseHermesRows([{ id: 1, role: "user", content, tool_call_id: null, tool_calls: null, tool_name: null, reasoning: null, timestamp: 1 }])[0]!.parts;
+  it("shows the actual request and skill instead of expanded instructions", () => {
+    expect(parse(`${scaffold}\n\nThe user has provided the following instruction alongside the skill invocation: Review changes\nKeep the API stable`)).toEqual([
+      { kind: "text", text: "Review changes\nKeep the API stable" },
+      { kind: "skill", skill: { name: "review", path: "/skills/review/SKILL.md", evidence: "instructions", status: "loaded" } },
+    ]);
+  });
+  it("shows a bare invocation without inventing request text", () => {
+    expect(parse(scaffold)).toEqual([{ kind: "skill", skill: { name: "review", path: "/skills/review/SKILL.md", evidence: "instructions", status: "loaded" } }]);
+  });
+  it("does not expose native runtime notes as user instructions", () => {
+    expect(parse(`${scaffold}\n\nThe user has provided the following instruction alongside the skill invocation: Review changes\n\n[Runtime note: internal]`)[0]).toEqual({ kind: "text", text: "Review changes" });
+  });
+  it("preserves quoted, unknown and clipped scaffolds verbatim", () => {
+    for (const content of [`Example: ${scaffold}`, `${header}\npartial`, `${scaffold}\n… trimmed`, '[IMPORTANT: The user has invoked the "review" skill bundle, unknown format]']) {
+      expect(parse(content)).toEqual([{ kind: "text", text: content }]);
+    }
+  });
+});
+
+describe("Hermes Ink session ownership", () => {
+  it("rejects foreign, stale and ambiguous registry sessions", () => {
+    const home = mkdtempSync(join(tmpdir(), "hermes-runtime-"));
+    try {
+      mkdirSync(join(home, "runtime"));
+      const gateway = { pid: process.pid, argv: ["python", "-m", "tui_gateway.entry"] };
+      const entry = { pid: process.pid, surface: "tui", process_start_time: processStartedAt(process.pid)! / 1000, session_id: "owned" };
+      const save = (entries: unknown[]) => writeFileSync(join(home, "runtime", "active_sessions.json"), JSON.stringify({ entries }));
+      save([entry]);
+      expect(hermesRuntimeSession(home, [gateway])).toBe("owned");
+      expect(hermesRuntimeSession(home, [])).toBeNull();
+      save([{ ...entry, process_start_time: entry.process_start_time - 60 }]);
+      expect(hermesRuntimeSession(home, [gateway])).toBeNull();
+      save([entry, { ...entry, session_id: "other" }]);
+      expect(hermesRuntimeSession(home, [gateway])).toBeNull();
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+});
 
 describe("hermes paths", () => {
   it("computes default hermes home and db path", () => {
