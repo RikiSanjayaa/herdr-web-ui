@@ -167,6 +167,8 @@ earlier prompt. Truncated command previews, unsupported dialogs and unrecognized
 custom input chrome stay in Terminal. Clear or send an existing terminal draft there
 before sending from Chat.
 Type `/clear` in Chat to open its native confirmation card; supported confirmations do not require a Terminal switch. Hermes command autocomplete is not provided in Chat yet, so type the command in full.
+Hermes Chat Stop shows **Stopping…** and consumes one interrupt per observed turn across this bridge's tabs and devices. Repeated clicks and the composer's Escape shortcut do not send another interrupt. Only an observed ready state confirms completion; after 10 seconds without confirmation, Chat says **Stop not confirmed. Check Terminal.** It never automatically retries or escalates to force-exit. A later observed turn gets its own Stop action after the native interrupt cooldown. Other agents' Stop behavior and direct Terminal keys are unchanged.
+The [manual test guide](hermes-safe-interaction-testing.md) walks through both Hermes interfaces on a separate local test session.
 
 Devin sessions are never selected by directory or recency alone. A plain `devin` shows the
 terminal text, since herdr does not report its session without its Devin integration; a session

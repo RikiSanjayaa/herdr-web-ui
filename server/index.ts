@@ -97,6 +97,7 @@ import { MirrorSession } from "./mirror.ts";
 import { mirrorInput } from "./mirror-input.ts";
 import { PendingInputs, PendingInputError, type PendingIdentity, type PendingRecord } from "./pending-input.ts";
 import { hermesClassicPasteMatches, hermesInputState, hermesSameInput, hermesViewportShowsLive } from "./hermes-input.ts";
+import { HermesStopError, HermesStops } from "./hermes-stop.ts";
 import { defaultHermesHome, isHermesProcess, processHermesHome } from "./hermes.ts";
 import { PendingRequestBook } from "./pending-requests.ts";
 import { interruptCodexSteering } from "./codex-steering.ts";
@@ -558,6 +559,15 @@ export function createServer(
     run.catch(() => {}).finally(() => { if (paneQueues.get(paneId) === run) paneQueues.delete(paneId); });
     return run;
   }
+
+  const hermesStops = new HermesStops({
+    serialize,
+    readPane: async (paneId) => paneGet(paneId).catch((error: unknown) => {
+      if (error instanceof HerdrError && error.code === "pane_not_found") return null;
+      throw error;
+    }),
+    interrupt: (paneId, guard) => paneSendKeys(paneId, ["ctrl+c"], undefined, guard),
+  });
 
   /**
    * Types a composer message and submits it, with its own Enter after the text: arriving
@@ -1620,6 +1630,8 @@ export function createServer(
 
   const collector = startStatusCollector({
     onStatus: (paneId, raw, agent, replay) => {
+      // Snapshot replays use the revision-checked reconcile below, not this event path.
+      if (!replay) hermesStops.status(paneId, raw, agent);
       // read back from a snapshot around a gap between subscriptions. An OmO pane's status there
       // is OmO's own or herdr's by turns (server/omo-status.ts), and a difference is no change
       if (replay && (omo.runs(paneId) || !completions.replayed(paneId, raw, replay))) return;
@@ -1678,10 +1690,14 @@ export function createServer(
     },
     // a pane created a moment ago got its agent after the roster's own read of it. After the
     // snapshot's replays: a roster read before them could show a finish ahead of its status frame
-    onReconciled: (panes) => { if (machines) machines.localAgents(panes); else bridgeAgents!.reconciled(panes); },
+    onReconciled: (panes) => {
+      hermesStops.reconcile(panes);
+      if (machines) machines.localAgents(panes); else bridgeAgents!.reconciled(panes);
+    },
     // the tracker first: what it makes of each pane (a finish after work is done, not idle) is
     // what the alerts are measured against from here, or the next event would alert of it
     onResync: (panes, newer) => {
+      hermesStops.reconcile(panes, newer);
       completions.resync(panes, newer);
       const settled = (pane: HerdrPane): AgentStatus => completions.current(pane.pane_id) ?? pane.agent_status;
       for (const pane of panes) { pending.status(pane.pane_id, settled(pane)); drainPending(pane.pane_id); }
@@ -1689,6 +1705,7 @@ export function createServer(
       push.resync(panes.map((pane) => ({ ...pane, agent_status: alertStatus(settled(pane), waits.waiting(pane.pane_id)) })), newer);
     },
     onPaneEnded: (paneId) => {
+      hermesStops.ended(paneId);
       holdPendingPane(paneId, { code: "pane_not_found", message: "The pane ended; its pending messages were not sent" });
       pending.forget(paneId);
       waits.forget(paneId);
@@ -1700,7 +1717,7 @@ export function createServer(
       push.onEnded(paneId).catch(logPushError);
     },
     onStructureChange: () => broadcastAll({ type: "session-changed" }),
-  }, { snapshot: rawSnapshot });
+  }, { snapshot: () => hermesStops.snapshot(rawSnapshot) });
   omo.start();
   claudeAgents.start();
   const waitTimer = setInterval(waitsRanOut, 1000);
@@ -2685,6 +2702,27 @@ export function createServer(
         }
       }
 
+      if (pathname === "/api/pane/hermes-stop") {
+        try {
+          if (request.method === "GET") {
+            const paneId = url.searchParams.get("pane_id");
+            if (!paneId) return badRequest("missing_pane_id", "pane_id is required");
+            return jsonResponse(await hermesStops.get(paneId), 200, { "cache-control": "no-store" });
+          }
+          if (request.method !== "POST") return badRequest("method_not_allowed", "use GET or POST");
+          let payload: unknown;
+          try { payload = await request.json(); }
+          catch { return badRequest("invalid_json", "request body must be JSON"); }
+          if (!isJsonObject(payload)) return badRequest("invalid_body", "request body must be a JSON object");
+          if (typeof payload.pane_id !== "string" || !payload.pane_id) return badRequest("missing_pane_id", "pane_id is required");
+          if (typeof payload.turn_id !== "string" || !payload.turn_id) return badRequest("missing_turn_id", "turn_id is required");
+          return jsonResponse(await hermesStops.request(payload.pane_id, payload.turn_id, request.signal), 200, { "cache-control": "no-store" });
+        } catch (error) {
+          if (error instanceof HermesStopError) return conflictResponse(error.code, error.message);
+          return errorResponse(error);
+        }
+      }
+
       if (pathname.startsWith("/api/pane/prompt")) {
         try {
           const response = await handlePromptRequest(request, url, { serialize, codexHome: options.codexHome });
@@ -3356,6 +3394,7 @@ export function createServer(
     stop: () => {
       stopped = true;
       settlePortalStartup({ ok: false, error: new Error("Server stopped before Portal startup cleanup completed") });
+      hermesStops.close();
       conversations.stop();
       clearInterval(outputTimer);
       collector.stop();

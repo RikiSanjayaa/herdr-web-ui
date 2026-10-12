@@ -13,6 +13,7 @@
  * What does not: files, images, push and remote PCs, which need a real machine.
  */
 import type { AgentIntegration, AgentStatus, ConversationTurn, IntegrationsResponse, Machine, MachineEvent, PaneDirection, PaneFindMatch, PaneFindRequest, PaneMoved, PanePlan, PaneResized, PaneSplit, PaneSwapped, PaneZoomed, PendingMessage, PlanStep, PluginActionResult, PluginActions, PluginActionsResponse, PortalStatus, ServerMessage, SessionSnapshot, TabMoved, UsageReport, WorkspaceCreated, WorkspaceInfo, WorktreeEntry, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../../shared/protocol.ts";
+import type { HermesStopResponse } from "../../shared/protocol.ts";
 import { VOICE_DEFAULTS, type VoiceStatus } from "../../shared/voice.ts";
 import { isAgentName } from "../../shared/agent-name.ts";
 import { neighborPane } from "../../src/lib/layoutMap.ts";
@@ -76,6 +77,36 @@ let promptId = PROMPT.id;
 let nextWorkspace = 100;
 let nextPending = 1;
 const replying = new Set(snapshot().panes.filter((pane) => pane.agent && pane.agent_status === "working").map((pane) => pane.pane_id));
+
+interface DemoHermesTurn {
+  turnId: string | null;
+  state: HermesStopResponse["state"];
+  ready: boolean;
+  cooldownUntil: number;
+}
+const hermesTurns = new Map<string, DemoHermesTurn>();
+
+/** Fictional native state, shared by every demo client action rather than by the button. */
+function demoHermesStop(paneId: string): HermesStopResponse {
+  const pane = paneOf(paneId);
+  if (pane?.agent !== "hermes") return { pane_id: paneId, turn_id: null, state: "unavailable" };
+  let turn = hermesTurns.get(paneId);
+  if (!turn) {
+    turn = { turnId: null, state: "unavailable", ready: true, cooldownUntil: Date.now() + 2500 };
+    hermesTurns.set(paneId, turn);
+  }
+  if (pane.agent_status === "idle" || pane.agent_status === "done") {
+    turn.ready = true;
+    if (turn.state === "stopping" || turn.state === "unconfirmed") turn.state = "stopped";
+  } else if (pane.agent_status === "working" && turn.ready) {
+    turn.ready = false;
+    turn.turnId = crypto.randomUUID();
+    turn.state = "available";
+  }
+  const state = turn.state === "available" && (pane.agent_status !== "working" || Date.now() < turn.cooldownUntil)
+    ? "unavailable" : turn.state;
+  return { pane_id: paneId, turn_id: state === "unavailable" ? null : turn.turnId, state };
+}
 /** herdr's state_change_seq: one counter per session, bumped on every agent state change */
 let stateSeq = Math.max(0, ...(local.snapshot?.agents ?? []).map((agent) => agent.state_change_seq ?? 0));
 const nextStateSeq = (): number => ++stateSeq;
@@ -401,6 +432,7 @@ function setStatus(paneId: string, status: AgentStatus): void {
   const pane = paneOf(paneId);
   if (!pane) return;
   pane.agent_status = status;
+  if (pane.agent === "hermes") demoHermesStop(paneId);
   // as herdr does, every state change bumps the session's counter on the pane's agent
   const agent = snapshot().agents.find((entry) => entry.pane_id === paneId);
   if (agent) Object.assign(agent, { agent_status: status, state_change_seq: nextStateSeq() });
@@ -473,7 +505,9 @@ function submitToChat(paneId: string, text: string): void {
   if (replying.has(paneId)) return;
   replying.add(paneId);
   setStatus(paneId, "working");
+  const hermesTurn = agent === "hermes" ? hermesTurns.get(paneId)?.turnId : null;
   setTimeout(() => {
+    if (agent === "hermes" && (hermesTurns.get(paneId)?.turnId !== hermesTurn || hermesTurns.get(paneId)?.state !== "available")) return;
     chat.turns.push({ role: "assistant", ts: now(), end_ts: now(), parts: [{ kind: "text", text: `This is the demo, so nothing ran. In the real app that message went to ${agent} in this pane, and its answer would be written here as it arrives, with its commands and edits folded above it.` }] });
     conversationChanged(paneId);
     finishDemoTurn(paneId);
@@ -673,6 +707,28 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     if (method !== "GET") return error("method_not_allowed", "use GET", 400);
     if (!paneId) return error("missing_pane_id", "pane_id query parameter is required", 400);
     return json({ plan: keyOfPane.get(paneId) === "api" ? { steps: planSteps } : null, server_time: new Date().toISOString() } satisfies PanePlan);
+  }
+  if (path === "/api/pane/hermes-stop") {
+    if (method === "GET") return json(demoHermesStop(paneId));
+    if (method !== "POST") return error("method_not_allowed", "use GET or POST", 400);
+    const body = await bodyOf(init, input);
+    const target = String(body["pane_id"] ?? "");
+    const current = demoHermesStop(target);
+    const turn = hermesTurns.get(target);
+    if (!target) return error("missing_pane_id", "pane_id is required", 400);
+    if (typeof body["turn_id"] !== "string" || !body["turn_id"]) return error("missing_turn_id", "turn_id is required", 400);
+    if (paneOf(target)?.agent !== "hermes") return error("hermes_stop_unavailable", "This pane has no observed working Hermes turn", 409);
+    if (!turn || body["turn_id"] !== turn.turnId) return error("hermes_stop_changed", "The Hermes turn or terminal changed; review its current state", 409);
+    if (current.state === "stopping" || current.state === "unconfirmed" || current.state === "stopped") return json(current);
+    if (current.state !== "available") return error("hermes_stop_unavailable", "Hermes Stop is not available for this turn", 409);
+    turn.state = "stopping";
+    turn.cooldownUntil = Date.now() + 2500;
+    const token = turn.turnId;
+    setTimeout(() => {
+      if (hermesTurns.get(target)?.turnId !== token || !paneOf(target)) return;
+      finishDemoTurn(target, "idle");
+    }, 600);
+    return json(demoHermesStop(target));
   }
   if (path === "/api/pane/prompt") return json({ prompt: keyOfPane.get(paneId) === "web" && promptOpen ? { ...PROMPT, id: promptId } : null });
   if (path === "/api/pane/prompt/answer") {

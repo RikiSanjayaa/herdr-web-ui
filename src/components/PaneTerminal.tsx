@@ -25,6 +25,7 @@ import { ApiError, assertAttachable, fetchPaneScroll, fetchPaneSelection, scroll
 import { parseOsc52 } from "../lib/osc52.ts";
 import { matchHerdrWidths } from "../lib/terminalWidths.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
+import { useHermesStop } from "../lib/useHermesStop.ts";
 import { PaneAwayContext } from "../lib/paneAwayContext.ts";
 import { paneStorageId } from "../../shared/machines.ts";
 import { KeyBar } from "./KeyBar.tsx";
@@ -2048,14 +2049,20 @@ export function PaneTerminal({
     }
   }, [inputLine, coarse, chatView, directTyping, paneId]);
 
-  // the composer's stop button: Escape interrupts the agent's current turn in every
-  // supported TUI (Claude Code, omp, codex) without killing the process the way ^C would
+  const hermesStop = useHermesStop(paneId,
+    agent === "hermes" && presented && active && chatView && connected && !held && !secretActive && !observing && !ended,
+    agent === "hermes" ? agentStatus : undefined);
   const abortTurn = useCallback(() => {
-    const term = termRef.current;
     const socket = socketRef.current;
-    if (!term || !socket || !socket.connected) return;
+    if (!socket || !socket.connected) return;
+    if (agent === "hermes") {
+      hermesStop.stop();
+      return;
+    }
+    const term = termRef.current;
+    if (!term) return;
     term.input("\u001b");
-  }, []);
+  }, [agent, hermesStop.stop]);
 
   // While the agent runs, append to its held messages. Each requires an explicit send.
   // a question in Codex's queue leaves the composer alone: Codex keeps working, and a
@@ -2521,6 +2528,7 @@ export function PaneTerminal({
           ) : null}
           onSend={composerSend}
           onAbort={abortTurn}
+          hermesStop={agent === "hermes" ? hermesStop : undefined}
           onUploadImage={uploadImage}
         />
       )}

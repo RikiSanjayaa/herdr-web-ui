@@ -180,6 +180,10 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  *         as it does for a send cancelled before any reply; older servers send neither)
  *  POST   /api/pane/prompt/answer { pane_id, prompt_id, option_index?, option_indices?, custom_text? }
  *         -> { ok: true } | 409 prompt_changed (the screen no longer shows that prompt)
+ *  GET    /api/pane/hermes-stop?pane_id= -> HermesStopResponse (current observed turn and Stop state)
+ *  POST   /api/pane/hermes-stop { pane_id, turn_id } -> HermesStopResponse
+ *         one native interrupt per observed Hermes turn, shared across clients; receipts do not
+ *         confirm stopping. Unknown outcomes never retry. Other agents and Terminal keys are unchanged.
  *  POST   /api/workspace/create { cwd?, label?, agent?: { kind, name?, args? } }
  *         -> WorkspaceCreated (workspace.create, then agent.start in the root pane when `agent` is given;
  *         omo and gjc, which herdr cannot start, are typed into the root pane's shell)
@@ -924,6 +928,21 @@ export interface SlashCommand {
   source: "builtin" | "user" | "project" | "skill" | "plugin";
   /** `$`: typed as `$name` (Codex skills); otherwise `/name` */
   trigger?: "$";
+}
+
+/** Hermes Chat Stop is a bridge-owned action, not an unrestricted Ctrl+C key. */
+export interface HermesStopRequest {
+  pane_id: string;
+  /** Opaque turn token from GET; a stale token cannot interrupt a later turn. */
+  turn_id: string;
+}
+
+export interface HermesStopResponse {
+  pane_id: string;
+  /** Null when no Hermes turn can currently accept a Stop request. */
+  turn_id: string | null;
+  /** Unavailable includes an unknown/nonworking agent and the native double-interrupt cooldown. */
+  state: "available" | "stopping" | "unconfirmed" | "stopped" | "unavailable";
 }
 
 /**

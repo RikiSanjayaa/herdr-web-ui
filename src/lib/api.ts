@@ -11,6 +11,8 @@ import type {
   FileInfo,
   FocusPaneRequest,
   HealthAuth,
+  HermesStopRequest,
+  HermesStopResponse,
   IntegrationsResponse,
   LanExposure,
   InteractivePrompt,
@@ -189,6 +191,22 @@ async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) throw await errorFrom(url, response);
   return (await response.json()) as T;
+}
+
+/** Hermes Stop never uses terminal input and is never retried by this client. */
+export async function fetchHermesStop(paneId: string, machineId = "local", signal?: AbortSignal): Promise<HermesStopResponse> {
+  const query = new URLSearchParams({ pane_id: paneId });
+  const url = machinePath(machineId, `pane/hermes-stop?${query}`);
+  const response = await fetch(url, { cache: "no-store", signal });
+  if (!response.ok) throw await errorFrom(url, response);
+  return await response.json() as HermesStopResponse;
+}
+
+export async function requestHermesStop(request: HermesStopRequest, machineId = "local", signal?: AbortSignal): Promise<HermesStopResponse> {
+  const url = machinePath(machineId, "pane/hermes-stop");
+  const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request), signal });
+  if (!response.ok) throw await errorFrom(url, response);
+  return await response.json() as HermesStopResponse;
 }
 
 export async function fetchSession(machineId = "local"): Promise<SessionSnapshot> {

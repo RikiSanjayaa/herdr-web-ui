@@ -4,7 +4,7 @@ import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, exists
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { ConversationMonitor } from "./conversation-monitor.ts";
-import { createServer } from "./index.ts";
+import { createServer, type ServerInstance } from "./index.ts";
 import type { AgentKind, AgentStatus, ApiError, HealthAuth, IntegrationsResponse, LanExposure, PortalStatus, PushKey, RemoteAccess, SessionSnapshot, TabMoved, PaneFindResponse, PaneReadResult, UsageReport, WorkspaceCreated, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../shared/protocol.ts";
 import { HerdrUpdater } from "./herdr-update.ts";
 import { PortalService } from "./portal.ts";
@@ -21,6 +21,8 @@ import { handleMachineRequest } from "./machine-api.ts";
 import type { MachineManager } from "./machines.ts";
 import { TailnetIdentitySource } from "./tailscale.ts";
 import { forgetTranscriptState } from "./conversation.ts";
+import type { HermesStopResponse } from "../shared/protocol.ts";
+import { DeviceStore } from "./devices.ts";
 
 /**
  * Contract test for herdr-web-ui's HTTP + WS surface.
@@ -224,6 +226,86 @@ describe("GET /api/pane/plan", () => {
       expect(typeof body.error.message).toBe("string");
     }
   });
+});
+
+describe("Hermes-only Stop API", () => {
+  it("scopes to the requested pane, guards auth/origin, and shares a consumed turn across concurrent callers", async () => {
+    const state = mkdtempSync(join(tmpdir(), "herdr-hermes-stop-contract-"));
+    const created = await workspaceCreate({ cwd: state, label: "herdr-web-ui-test-hermes-stop" });
+    let app: ServerInstance | undefined;
+    try {
+      const paneId = created.root_pane.pane_id;
+      const devices = new DeviceStore(state);
+      const watcher = devices.pair(devices.startPairing().code, "Stop contract watch", "watch")!;
+      const other = await tabCreate({ workspaceId: created.workspace.workspace_id });
+      app = createServer({ port: 0, stateDir: state, token: "hermes-stop-contract" });
+      const at = `http://localhost:${app.port}`;
+      const headers = { authorization: "Bearer hermes-stop-contract", "content-type": "application/json" };
+      const path = "/api/pane/hermes-stop";
+      const get = async (id = paneId): Promise<HermesStopResponse> => {
+        const response = await fetch(`${at}${path}?pane_id=${encodeURIComponent(id)}`, { headers });
+        expect(response.status).toBe(200);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        return response.json();
+      };
+      const post = (id: string, turnId: string, extra: Record<string, string> = {}) => fetch(`${at}${path}`, {
+        method: "POST", headers: { ...headers, ...extra }, body: JSON.stringify({ pane_id: id, turn_id: turnId }),
+      });
+      expect((await fetch(`${at}${path}?pane_id=${encodeURIComponent(paneId)}`)).status).toBe(401);
+      expect((await fetch(`${at}${path}`, { method: "POST", body: JSON.stringify({ pane_id: paneId, turn_id: "old" }) })).status).toBe(401);
+      const watchHeaders = { cookie: `herdr_web_device=${watcher.token}`, origin: at, "content-type": "application/json" };
+      expect((await fetch(`${at}${path}?pane_id=${encodeURIComponent(paneId)}`, { headers: watchHeaders })).status).toBe(200);
+      const watchedPost = await fetch(`${at}${path}`, { method: "POST", headers: watchHeaders, body: JSON.stringify({ pane_id: paneId, turn_id: "old" }) });
+      expect(watchedPost.status).toBe(403);
+      expect((await watchedPost.json() as ApiError).error.code).toBe("read_only");
+      expect((await post(paneId, "old", { "sec-fetch-site": "cross-site" })).status).toBe(403);
+      expect((await get()).state).toBe("unavailable");
+      const shell = await post(paneId, "old");
+      expect(shell.status).toBe(409);
+      expect((await shell.json() as ApiError).error.code).toBe("hermes_stop_unavailable");
+      expect(await get("w9999:p9999")).toEqual({ pane_id: "w9999:p9999", turn_id: null, state: "unavailable" });
+      expect((await fetch(`${at}${path}`, { headers })).status).toBe(400);
+      expect((await fetch(`${at}${path}`, { method: "POST", headers, body: "[]" })).status).toBe(400);
+      expect((await fetch(`${at}${path}`, { method: "POST", headers, body: JSON.stringify({ pane_id: paneId }) })).status).toBe(400);
+
+      // This test's shell receives the key, not a real agent or any user's pane.
+      await herdrRpc("pane.report_agent", { pane_id: paneId, source: "manual", agent: "hermes", state: "working" });
+      let available = await get();
+      // Real HTTP/collector work crosses the live herdr process, so this bounded poll exercises the real startup cooldown rather than fake process time.
+      const deadline = Date.now() + 5_000;
+      while (available.state !== "available" && Date.now() < deadline) { await Bun.sleep(25); available = await get(); }
+      expect(available.state).toBe("available");
+      expect(typeof available.turn_id).toBe("string");
+      const turnId = available.turn_id!;
+      expect(await get(other.root_pane.pane_id)).toEqual({ pane_id: other.root_pane.pane_id, turn_id: null, state: "unavailable" });
+      const wrongPane = await post(other.root_pane.pane_id, turnId);
+      expect(wrongPane.status).toBe(409);
+      const changed = await post(paneId, "not-this-turn");
+      expect(changed.status).toBe(409);
+      expect((await changed.json() as ApiError).error.code).toBe("hermes_stop_changed");
+
+      const concurrent = await Promise.all(Array.from({ length: 8 }, () => post(paneId, turnId)));
+      for (const response of concurrent) {
+        expect(response.status).toBe(200);
+        expect(await response.json() as HermesStopResponse).toEqual({ pane_id: paneId, turn_id: turnId, state: "stopping" });
+      }
+      const scoped = await fetch(`${at}/api/machines/local/pane/hermes-stop?pane_id=${encodeURIComponent(paneId)}`, { headers });
+      expect(scoped.status).toBe(200);
+      expect(await scoped.json()).toEqual({ pane_id: paneId, turn_id: turnId, state: "stopping" });
+      const duplicate = await post(paneId, turnId);
+      expect(await duplicate.json()).toEqual({ pane_id: paneId, turn_id: turnId, state: "stopping" });
+      await herdrRpc("pane.report_agent", { pane_id: paneId, source: "manual", agent: "hermes", state: "idle" });
+      expect(await get()).toEqual({ pane_id: paneId, turn_id: turnId, state: "stopped" });
+      await herdrRpc("pane.report_agent", { pane_id: paneId, source: "manual", agent: "hermes", state: "working" });
+      const stale = await post(paneId, turnId);
+      expect(stale.status).toBe(409);
+      expect((await stale.json() as ApiError).error.code).toBe("hermes_stop_changed");
+    } finally {
+      app?.stop();
+      await workspaceClose(created.workspace.workspace_id);
+      rmSync(state, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
 
 describe("Devin conversation API", () => {

@@ -99,6 +99,9 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   ([#783](https://github.com/devswha/herdr-web-ui/pull/783) by @kilhyeonjun)
 
 ### Fixed
+- Hermes Chat Stop suppresses repeated clicks and composer Escape across a bridge's clients,
+  shows Stopping while waiting, and keeps uncertain outcomes consumed without retrying or
+  force-exiting. Other agents and direct Terminal input are unchanged.
 - Hermes Chat cards recognize the installed TUI's approval footer and single clarification
   questions, and typed answers wait for the native editor before Enter. Classic CLI
   slash-command autocomplete no longer blocks a Chat `/clear` send.

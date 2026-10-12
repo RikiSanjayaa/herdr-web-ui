@@ -19,6 +19,7 @@ import "./Composer.css";
 
 import type { AgentStatus, ConversationMetadata, PlanSummary, SlashCommand } from "../../shared/protocol.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
+import type { HermesStopState } from "../lib/hermesStop.ts";
 import { composerDrafts } from "../lib/composerDraft.ts";
 import { paneStorageId } from "../../shared/machines.ts";
 import {
@@ -78,6 +79,8 @@ export interface ComposerProps {
    * promise settles to any of them */
   onSend: (text: string, clearDraft?: string) => boolean | string | DraftRefusal | Promise<boolean | string | DraftRefusal>;
   onAbort: () => void;
+  /** Hermes alone uses the bridge's observed turn guard; Send and typing stay independent. */
+  hermesStop?: { state: HermesStopState; canStop: boolean };
   onUploadImage: (file: File) => Promise<string>;
 }
 
@@ -237,6 +240,7 @@ export function Composer({
   greeting = null,
   onSend,
   onAbort,
+  hermesStop,
   onUploadImage,
 }: ComposerProps) {
   const t = useT();
@@ -848,6 +852,7 @@ export function Composer({
       // a draft puts Send where Stop was: Escape is then the Stop the agent's own input has
       if (event.key === "Escape" && connected && agentStatus === "working" && textRef.current.trim().length > 0) {
         event.preventDefault();
+        if (agent === "hermes" && event.repeat) return;
         onAbort();
         return;
       }
@@ -865,7 +870,7 @@ export function Composer({
       event.preventDefault();
       send();
     },
-    [agentStatus, choices, connected, menuDismissed, menuOpen, offered, onAbort, selectCompletion, selectedIndex, send, setTextAndCaret, settings.enterSends, trigger],
+    [agent, agentStatus, choices, connected, menuDismissed, menuOpen, offered, onAbort, selectCompletion, selectedIndex, send, setTextAndCaret, settings.enterSends, trigger],
   );
 
   const onPaste = useCallback(
@@ -895,6 +900,12 @@ export function Composer({
   const shownStatus = paneStatus({ agent_status: agentStatus, ...(backgroundWait ? { background_wait: true as const } : {}) });
   const statusCompact = composerStatusCompact(cardWidth);
   const sendShown = composerSendShown({ working: isWorking, text });
+  const hermesStopNote = agent !== "hermes" || hermesStop === undefined ? null
+    : hermesStop.state === "stopping" ? t("Stopping…")
+    : hermesStop.state === "unconfirmed" ? t("Stop not confirmed. Check Terminal.")
+    : hermesStop.state === "unsupported" ? t("This bridge does not support safe Stop. Use Terminal and check Hermes before interrupting.")
+    : hermesStop.state === "unavailable" && isWorking ? t("Safe Stop unavailable. Check Terminal before interrupting Hermes.")
+    : hermesStop.state === "checking" && isWorking ? t("Checking safe Stop…") : null;
   const hint = composerStatusHint({ uploading, connected, text });
   const model = metadata?.model ? modelLabel(metadata.model) : null;
   const modelShown = Boolean(metadata?.model || metadata?.reasoning_effort);
@@ -1169,9 +1180,9 @@ export function Composer({
             <button
               type="button"
               className="composer-action composer-stop"
-              aria-label={t("Stop agent")}
-              title={t("Stop agent")}
-              disabled={!connected}
+              aria-label={agent === "hermes" && hermesStop?.state === "stopping" ? t("Stopping…") : t("Stop agent")}
+              title={hermesStopNote ?? t("Stop agent")}
+              disabled={!connected || (agent === "hermes" && hermesStop?.canStop !== true)}
               onClick={onAbort}
             >
               <Square aria-hidden="true" />
@@ -1190,6 +1201,7 @@ export function Composer({
           )}
         </div>
       </div>
+      {hermesStopNote !== null && <div className="composer-hint" role="status">{hermesStopNote}</div>}
       {/* said while typing, before the send: after it the browser is already open and the reader is
           already in the state the words describe. Not a block — the text still goes, and pi runs the
           command in the terminal the way its own palette would */}
