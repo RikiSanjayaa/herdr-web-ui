@@ -248,7 +248,7 @@ export async function paneHermesCommandContext(paneId: string, configuredHome?: 
     if (!features) continue;
     if (processStartedAt(native.pid) !== startedAt && process.platform !== "darwin") return null;
     const filesystem = process.platform === "linux" ? `/proc/${native.pid}/root` : "/";
-    return { ...features, home, userHome: env.HOME, env, ink: processes.some(isTuiGateway),
+    return { ...features, home, userHome: env.HOME, env,
       docker: existsSync(join(filesystem, ".dockerenv")) || existsSync(join(filesystem, "run", ".containerenv")),
       s6: existsSync(join(filesystem, "run", "s6")) || existsSync(join(filesystem, "package", "admin", "s6-overlay")) };
   }

@@ -122,7 +122,7 @@ type Responder =
   | "hermes-question"
   | "hermes-input"
   | "hermes-status"
-  | "hermes-help"
+  | "hermes-output"
   | "fallback-menu"
   | "fallback-gjc-menu"
   | "fallback-keys";
@@ -1892,7 +1892,7 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // question leaves the screen, so a hint among the last few lines is the live one
   if (prompt.responder === "hermes-question" || prompt.responder === "hermes-input") return shown.slice(-4).some((line) => HERMES_HINT_RE.test(line));
   if (prompt.responder === "hermes-status") return true; // its complete, bottom-most native overlay is checked by the parser
-  if (prompt.responder === "hermes-help") return true; // read-only panel, admitted only after this pane's explicit /help
+  if (prompt.responder === "hermes-output") return true; // read-only output admitted only after this pane's explicit command
   if (prompt.responder === "codex-menu") return ends(CODEX_CONTINUE_HINT_RE);
   if (prompt.responder === "codex-question") return ends(CODEX_ASK_HINT_RE);
   if (prompt.responder === "codex-async-question") return cleanLines.slice(-4).some((line) => CODEX_ASYNC_ASK_HINT_RE.test(line)) || ends(CODEX_ASYNC_ASK_HINT_RE);
@@ -2278,7 +2278,37 @@ function parseHermesHelp(screen: string, sent: string | null): ParsedPrompt | nu
     kind: "menu", title: "Help", question: "Visible terminal output; use Terminal to scroll the full help.",
     body: lines.slice(title >= 0 ? start + 1 : start, end).filter(line => !isDivider(line)).map(line => line.replace(/\s*┃$/, "")).join("\n").trim(),
     options: [{ label: "Dismiss", description: null }], multi_select: false, custom_option_index: null,
-  }, { responder: "hermes-help", menuLabels: ["Dismiss"], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null, optionSteps: [[]] });
+  }, { responder: "hermes-output", menuLabels: ["Dismiss"], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null, optionSteps: [[]] });
+}
+
+/** Classic Hermes prints command results above its status bar and bordered input box. */
+function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPrompt | null {
+  const command = sent?.trim();
+  if (command !== "/help" && command !== "/status") return null;
+  const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map(cleanLine);
+  const input = findLastIndex(lines, line => /^(?:[\w.-]+\s+)?❯(?:\s.*)?$/.test(line));
+  if (input < 0) return null;
+  const footer = findLastIndex(lines.slice(0, input), line => /^⚕\s.+│/.test(line));
+  if (footer < 0 || lines.slice(footer + 1, input).some(line => line && !isDivider(line))) return null;
+  const output = lines.slice(0, footer);
+  let start: number, end: number;
+  if (command === "/status") {
+    start = findLastIndex(output, line => line === "Hermes CLI Status");
+    end = findLastIndex(output, line => /^Agent Running: (?:Yes|No)$/.test(line));
+    if (start < 0 || end <= start || !output.slice(start, end).some(line => /^Session ID: /.test(line))
+      || !output.slice(start, end).some(line => /^Model: /.test(line)) || !output.slice(start, end).some(line => /^Tokens: /.test(line))) return null;
+  } else {
+    const tip = findLastIndex(output, line => /^Tip: \/help skills lists skill commands/.test(line));
+    end = findLastIndex(output, line => /^(?:Paste image: Alt\+V \(or \/paste\)|Attach image: \/image )/.test(line));
+    start = output.findIndex(line => /^\/[\w-]+\s+-\s|^── .+ ──$/.test(line));
+    if (tip < 0 || start < 0 || start >= tip || end < tip) return null;
+  }
+  if (output.slice(end + 1).some(Boolean)) return null;
+  return finishPrompt("hermes", {
+    kind: "menu", title: command === "/help" ? "Help" : "Status", question: "Visible terminal output; use Terminal to scroll the full output.",
+    body: output.slice(start, end + 1).join("\n").trim(),
+    options: [{ label: "Dismiss", description: null }], multi_select: false, custom_option_index: null,
+  }, { responder: "hermes-output", menuLabels: ["Dismiss"], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null, optionSteps: [[]] });
 }
 
 function parseHermesClarify(screen: string): ParsedPrompt | null {
@@ -2374,7 +2404,7 @@ function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null
         : agent === "pi"
           ? [parsePiModel(screen), parsePiDialog(screen), ...omo()]
         : agent === "hermes"
-          ? [parseHermesClarify(screen), parseHermesStatus(screen), working ? null : parseHermesHelp(screen, sent)]
+          ? [parseHermesClarify(screen), parseHermesStatus(screen), working ? null : parseHermesHelp(screen, sent), working ? null : parseHermesClassicOutput(screen, sent)]
         : agent === "omo" || agent === ""
           ? omo()
           : [];
@@ -3362,7 +3392,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         if (error instanceof InvalidAnswer) return badRequest("invalid_answer", error.message);
         throw error;
       }
-      if (parsedByPublicPrompt.get(prompt)?.responder === "hermes-help") {
+      if (parsedByPublicPrompt.get(prompt)?.responder === "hermes-output") {
         // Dismissing a read-only result must not send Escape into the native input box.
         chatSent.delete(body.pane_id);
         askingEnded(body.pane_id);

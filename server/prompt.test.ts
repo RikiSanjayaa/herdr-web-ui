@@ -40,6 +40,9 @@ function hermesStatusOutput(body = "Model: test-model\nTokens: 0", end = false, 
   const hints = wrapped ? [hint.slice(0, 48), hint.slice(48)] : [hint];
   return ["╔" + "═".repeat(110) + "╗", ...["", "Status", "", ...body.split("\n"), "", ...hints, ""].map(line => `║ ${line.padEnd(108)} ║ backdrop must not enter the card`), "╚" + "═".repeat(110) + "╝"].join("\n");
 }
+const hermesClassicStatus = "Hermes CLI Status\nSession ID: test-session\nPath: /tmp/test-home\nModel: test-model (custom)\nTokens: 0\nAgent Running: No";
+const hermesClassicHelp = "/reload-skills - Re-scan skills\n── Exit ──\n/quit - Exit the CLI\nTip: /help skills lists skill commands · /help <text> filters · Ctrl+P opens the command palette\nMulti-line: Ctrl+J, Alt+Enter, or \\\\+Enter for a new line\nDraft editor: Ctrl+G (Alt+G in VSCode/Cursor)\nPaste image: Alt+V (or /paste)";
+const hermesClassicOutput = (body: string) => `${body}\n⚕ test-model │ ctx -- │ 2s\n────────────────────────────────\n❯ Research this topic\n────────────────────────────────`;
 
 describe("Hermes native informational output", () => {
   test("extracts the status overlay without its underlying transcript", () => {
@@ -67,6 +70,19 @@ describe("Hermes native informational output", () => {
     expect(answerKeys(prompt, { option_index: 0 })).toEqual([]);
     expect(parseInteractivePrompt("hermes", hermesHelpOutput + "typed draft", null, true, [], "/help")).toBeNull();
     expect(parseInteractivePrompt("hermes", hermesHelpOutput, null, true, [], "/help", true)).toBeNull();
+  });
+  test("shows classic status without previous conversation or input chrome", () => {
+    const screen = hermesClassicOutput(`Earlier user message\n${hermesClassicStatus}`);
+    expect(parseInteractivePrompt("hermes", screen)).toBeNull();
+    const prompt = parseInteractivePrompt("hermes", screen, null, true, [], "/status")!;
+    expect(prompt.body).toBe(hermesClassicStatus);
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([]);
+    expect(parseInteractivePrompt("hermes", screen.replace("Agent Running: No", "partial"), null, true, [], "/status")).toBeNull();
+  });
+  test("shows only attested classic help output and rejects stale output followed by another response", () => {
+    const screen = hermesClassicOutput(hermesClassicHelp);
+    expect(parseInteractivePrompt("hermes", screen, null, true, [], "/help")?.body).toBe(hermesClassicHelp);
+    expect(parseInteractivePrompt("hermes", hermesClassicOutput(`${hermesClassicHelp}\nNew assistant answer`), null, true, [], "/help")).toBeNull();
   });
 });
 
@@ -3041,6 +3057,17 @@ describe("an answer and the menu it was made for", () => {
       expect(next.id).not.toBe(first.id);
       expect((await answer(first.id, { option_index: 0 })).status).toBe(409);
       await answer(next.id, { option_index: 0 });
+    });
+  });
+
+  test("dismisses classic status without sending any terminal key", async () => {
+    await withPane("hermes", "idle", hermesClassicOutput(hermesClassicStatus), async pane => {
+      noteSubmitted("p_1", "/status");
+      const first = (await card())!;
+      expect(first.body).toBe(hermesClassicStatus);
+      expect((await answer(first.id, { option_index: 0 })).status).toBe(200);
+      expect(pane.sent).toEqual([]);
+      expect(await card()).toBeNull();
     });
   });
 
