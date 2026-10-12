@@ -121,6 +121,8 @@ type Responder =
   | "pi-model"
   | "hermes-question"
   | "hermes-input"
+  | "hermes-status"
+  | "hermes-help"
   | "fallback-menu"
   | "fallback-gjc-menu"
   | "fallback-keys";
@@ -1889,6 +1891,8 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // Hermes keeps its status line (and maybe the hint's wrapped tail) under the hint; an answered
   // question leaves the screen, so a hint among the last few lines is the live one
   if (prompt.responder === "hermes-question" || prompt.responder === "hermes-input") return shown.slice(-4).some((line) => HERMES_HINT_RE.test(line));
+  if (prompt.responder === "hermes-status") return true; // its complete, bottom-most native overlay is checked by the parser
+  if (prompt.responder === "hermes-help") return true; // read-only panel, admitted only after this pane's explicit /help
   if (prompt.responder === "codex-menu") return ends(CODEX_CONTINUE_HINT_RE);
   if (prompt.responder === "codex-question") return ends(CODEX_ASK_HINT_RE);
   if (prompt.responder === "codex-async-question") return cleanLines.slice(-4).some((line) => CODEX_ASYNC_ASK_HINT_RE.test(line)) || ends(CODEX_ASYNC_ASK_HINT_RE);
@@ -2230,6 +2234,53 @@ const HERMES_ASK_RE = /^ask \d+ questions?$/;
 const HERMES_ROW_RE = /^(▸ )?(\[[ x]\] )?(\d+)\. (.+)$/;
 const HERMES_OTHER = "Other (type your answer)";
 
+const HERMES_PAGER_HINT_RE = /^(?:↑↓\/jkline·Enter\/Space\/PgDnpage·b\/PgUpback·g\/Gtop\/bottom·Esc\/qclose\(\d+\/\d+\)|end·↑↓\/jk·b\/PgUpback·gtop·Esc\/qclose\(\d+lines\))$/;
+
+/** Ink's status pager is read-only; each button sends one explicit native pager key. */
+function parseHermesStatus(screen: string): ParsedPrompt | null {
+  const raw = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  const top = findLastIndex(raw, line => /^\s*╔═+╗/.test(line));
+  if (top < 0) return null;
+  const bottom = raw.findIndex((line, index) => index > top && /^\s*╚═+╝/.test(line));
+  if (bottom < 0 || raw.slice(bottom + 1).filter(line => line.trim()).length > 2) return null;
+  const rows = raw.slice(top + 1, bottom);
+  if (!rows.every(line => /^\s*║.*║/.test(line))) return null;
+  const lines = rows.map(line => line.slice(line.indexOf("║") + 1, line.lastIndexOf("║")).trim());
+  const title = lines.findIndex(Boolean);
+  if (title < 0 || lines[title] !== "Status") return null;
+  const hint = lines.findIndex((line, index) => index > title && /^(?:↑|end)/.test(line) && [1, 2, 3, 4, 5, 6, 7, 8].some(span => HERMES_PAGER_HINT_RE.test(lines.slice(index, index + span).join("").replace(/\s+/g, ""))));
+  if (hint < 0) return null;
+  const body = lines.slice(title + 1, hint).join("\n").trim();
+  const end = lines[hint]!.startsWith("end ·");
+  const options = end ? ["Previous page", "Close"] : ["Previous page", "Next page", "Close"];
+  return finishPrompt("hermes", {
+    kind: "menu", title: "Status", question: "Native terminal output", body,
+    options: options.map(label => ({ label, description: null })), multi_select: false, custom_option_index: null,
+  }, { responder: "hermes-status", menuLabels: options, selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
+    optionSteps: (end ? ["pageup", KEY.escape] : ["pageup", "pagedown", KEY.escape]).map(key => keySteps([key])) });
+}
+
+/** Help is an Ink transcript panel, not a pager or a SQLite turn. Show only its visible portion. */
+function parseHermesHelp(screen: string, sent: string | null): ParsedPrompt | null {
+  if (sent?.trim() !== "/help") return null;
+  const raw = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  const lines = raw.map(cleanLine);
+  const title = findLastIndex(lines, line => line === "(^_^)? Commands");
+  const hotkeys = findLastIndex(lines, line => line === "Hotkeys");
+  let start = title >= 0 ? title : hotkeys;
+  if (title < 0) while (start > 0 && /^\s*│/.test(raw[start - 1]!)) start -= 1;
+  if (start < 0) return null;
+  const end = lines.findIndex((line, index) => index > start && /^╰[─━]+(?:╯|\s*┃)$/.test(line));
+  if (end < 0 || !lines.slice(start + 1, end).some(line => /\/help|Ctrl|ctrl|Enter|Tab/.test(line))) return null;
+  const tail = lines.slice(end + 1).filter(Boolean);
+  if (!tail.some(line => /^─?\s*ready\b/.test(line)) || !tail.every(line => /^─?\s*ready\b|^❯(?:\s+Try ".*")?$/.test(line))) return null;
+  return finishPrompt("hermes", {
+    kind: "menu", title: "Help", question: "Visible terminal output; use Terminal to scroll the full help.",
+    body: lines.slice(title >= 0 ? start + 1 : start, end).filter(line => !isDivider(line)).map(line => line.replace(/\s*┃$/, "")).join("\n").trim(),
+    options: [{ label: "Dismiss", description: null }], multi_select: false, custom_option_index: null,
+  }, { responder: "hermes-help", menuLabels: ["Dismiss"], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null, optionSteps: [[]] });
+}
+
 function parseHermesClarify(screen: string): ParsedPrompt | null {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map((line) => line.trimEnd());
   const hintIndex = findLastIndex(lines, (line) => HERMES_HINT_RE.test(line.trim()));
@@ -2323,7 +2374,7 @@ function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null
         : agent === "pi"
           ? [parsePiModel(screen), parsePiDialog(screen), ...omo()]
         : agent === "hermes"
-          ? [parseHermesClarify(screen)]
+          ? [parseHermesClarify(screen), parseHermesStatus(screen), working ? null : parseHermesHelp(screen, sent)]
         : agent === "omo" || agent === ""
           ? omo()
           : [];
@@ -3125,7 +3176,7 @@ async function readKnownPrompt(
   // a pane herdr names claude, or not at all, is omo's only on evidence: herdr reports it waiting
   // on the user, or the session's pending call is the form on screen
   const omoTrusted = (agent !== "claude" && agent !== "") || pane.agent_status === "blocked";
-  const prompt = parseInteractivePrompt(agent, screen, omoAsks[0] ?? null, omoTrusted, omoAsks, agent === "claude" ? heldCandidate(paneId) : null, pane.agent_status === "working");
+  const prompt = parseInteractivePrompt(agent, screen, omoAsks[0] ?? null, omoTrusted, omoAsks, agent === "claude" ? heldCandidate(paneId) : agent === "hermes" ? lastChatSubmitted(paneId) : null, pane.agent_status === "working");
   if (prompt && await claudeHeldIsGrey(paneId, prompt)) return { prompt: null, screen };
   if (!prompt && agent === "gjc") {
     const fallback = parseFallbackPrompt(agent, screen);
@@ -3310,6 +3361,12 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
       } catch (error) {
         if (error instanceof InvalidAnswer) return badRequest("invalid_answer", error.message);
         throw error;
+      }
+      if (parsedByPublicPrompt.get(prompt)?.responder === "hermes-help") {
+        // Dismissing a read-only result must not send Escape into the native input box.
+        chatSent.delete(body.pane_id);
+        askingEnded(body.pane_id);
+        return jsonResponse({ ok: true });
       }
       // The asking this answer is for, held to its last key: once anything says it ended (the
       // agent back at work), no key of this answer goes out any more, whatever the screen shows.

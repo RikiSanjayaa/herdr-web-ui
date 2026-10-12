@@ -679,7 +679,9 @@ export function createServer(
           if (clearDraft !== undefined && !claudeInputEmpty(...reads)) throw new InputDraftError(null);
         }
         try {
-          await agentPrompt(paneId, closeMention(text));
+          // Ink's /help and /status completion must be closed before the committing Enter.
+          const submitted = pane?.agent === "hermes" && /^\/(?:help|status)\s*$/.test(text) ? `${text.trim()} ` : closeMention(text);
+          await agentPrompt(paneId, submitted);
           noteSubmitted(paneId, text);
           return;
         } catch (error) {

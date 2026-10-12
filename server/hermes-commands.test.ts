@@ -38,6 +38,13 @@ describe("Hermes discovery", () => {
     expect(hermesCommands(cwd, null).filter(c => c.source !== "builtin")).toEqual([]);
     expect(paneCommands("hermes", cwd, undefined, { hermesContext: null }).filter(c => c.source !== "builtin")).toEqual([]);
   });
+  it("offers native result commands only for a resolved Ink process", () => {
+    const ctx = context();
+    expect(hermesCommands(null, ctx).some(command => command.name === "status")).toBeFalse();
+    const ink = hermesCommands(null, { ...ctx, ink: true });
+    expect(ink.find(command => command.name === "help")?.source).toBe("builtin");
+    expect(ink.find(command => command.name === "status")?.source).toBe("builtin");
+  });
 
   it("requires trust and current native scan proof before project precedence applies", () => {
     const ctx = context(), repo = temp(), external = temp();

@@ -33,6 +33,43 @@ const claudeBackgroundApproval = (selected: number, footer = CLAUDE_BACKGROUND_A
   ].join("\n");
 };
 
+// Sanitized shapes captured from Hermes Ink's native help panel and status pager.
+const hermesHelpOutput = "│ TUI │\n│ /logs Show recent gateway log lines │\n│ Hotkeys │\n│ Ctrl+C copy selection / clear draft / interrupt / exit │\n│ Tab apply completion │\n╰──────────────────────────────────╯\n─ ready │ test model │ 1 session\n❯";
+function hermesStatusOutput(body = "Model: test-model\nTokens: 0", end = false, wrapped = false): string {
+  const hint = end ? "end · ↑↓/jk · b/PgUp back · g top · Esc/q close (9 lines)" : "↑↓/jk line · Enter/Space/PgDn page · b/PgUp back · g/G top/bottom · Esc/q close (5/9)";
+  const hints = wrapped ? [hint.slice(0, 48), hint.slice(48)] : [hint];
+  return ["╔" + "═".repeat(110) + "╗", ...["", "Status", "", ...body.split("\n"), "", ...hints, ""].map(line => `║ ${line.padEnd(108)} ║ backdrop must not enter the card`), "╚" + "═".repeat(110) + "╝"].join("\n");
+}
+
+describe("Hermes native informational output", () => {
+  test("extracts the status overlay without its underlying transcript", () => {
+    const prompt = parseInteractivePrompt("hermes", hermesStatusOutput())!;
+    expect(prompt.body).toBe("Model: test-model\nTokens: 0");
+    expect(labels(prompt)).toEqual(["Previous page", "Next page", "Close"]);
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["pagedown"] }]);
+  });
+  test("reads wrapped footer text and offers no next-page action at the end", () => {
+    const prompt = parseInteractivePrompt("hermes", hermesStatusOutput("Agent Running: No", true, true))!;
+    expect(prompt.body).toBe("Agent Running: No");
+    expect(labels(prompt)).toEqual(["Previous page", "Close"]);
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
+  });
+  test("requires a complete active status overlay", () => {
+    for (const screen of [hermesStatusOutput().replace("Status", "Logs"), hermesStatusOutput().split("\n").slice(0, -1).join("\n"), hermesStatusOutput() + "\nnew response\nmore output\n❯"]) {
+      expect(parseInteractivePrompt("hermes", screen)).toBeNull();
+    }
+  });
+  test("shows visible help only after an explicit help send with an empty native input", () => {
+    expect(parseInteractivePrompt("hermes", hermesHelpOutput)).toBeNull();
+    const prompt = parseInteractivePrompt("hermes", hermesHelpOutput, null, true, [], "/help")!;
+    expect(prompt.body).toContain("/logs Show recent gateway log lines");
+    expect(prompt.body).toContain("Tab apply completion");
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([]);
+    expect(parseInteractivePrompt("hermes", hermesHelpOutput + "typed draft", null, true, [], "/help")).toBeNull();
+    expect(parseInteractivePrompt("hermes", hermesHelpOutput, null, true, [], "/help", true)).toBeNull();
+  });
+});
+
 describe("interactive prompt parsing", () => {
   test("invalidates approvals when their command changes, including text beyond the display cap", () => {
     const screen = (command: string, secondSelected = false) => `
@@ -2967,6 +3004,45 @@ describe("an answer and the menu it was made for", () => {
     const body = await response.json() as { error?: { code: string } };
     return { status: response.status, code: body.error?.code };
   }
+
+  test("pages Hermes status and rejects an answer for the previous page", async () => {
+    await withPane("hermes", "idle", hermesStatusOutput(), async pane => {
+      const first = (await card())!;
+      pane.onSent = key => { if (key === "pagedown") pane.screen = hermesStatusOutput("Tokens: 30", true); if (key === "esc") pane.screen = "─ ready\n❯"; };
+      expect((await answer(first.id, { option_index: 1 })).status).toBe(200);
+      expect(pane.sent).toEqual(["pagedown"]);
+      expect((await answer(first.id, { option_index: 2 })).status).toBe(409);
+      const next = (await card())!;
+      expect(next.body).toBe("Tokens: 30");
+      expect((await answer(next.id, { option_index: 1 })).status).toBe(200);
+      expect(pane.sent).toEqual(["pagedown", "esc"]);
+      expect(await card()).toBeNull();
+    });
+  });
+
+  test("sends no Hermes pager key after another prompt replaces it", async () => {
+    await withPane("hermes", "idle", hermesStatusOutput(), async pane => {
+      const first = (await card())!;
+      pane.screen = "Other native prompt\n❯ typed draft";
+      expect((await answer(first.id, { option_index: 1 })).status).toBe(409);
+      expect(pane.sent).toEqual([]);
+    });
+  });
+
+  test("dismisses help without touching native input, and rearms on a new help send", async () => {
+    await withPane("hermes", "idle", hermesHelpOutput, async pane => {
+      noteSubmitted("p_1", "/help");
+      const first = (await card())!;
+      expect((await answer(first.id, { option_index: 0 })).status).toBe(200);
+      expect(pane.sent).toEqual([]);
+      expect(await card()).toBeNull();
+      noteSubmitted("p_1", "/help");
+      const next = (await card())!;
+      expect(next.id).not.toBe(first.id);
+      expect((await answer(first.id, { option_index: 0 })).status).toBe(409);
+      await answer(next.id, { option_index: 0 });
+    });
+  });
 
   const omoRule = "─".repeat(100);
   const omoWidget = (box = "❯") => `? Question pending (1 unanswered) · 30m

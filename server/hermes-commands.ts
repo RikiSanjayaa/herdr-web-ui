@@ -18,6 +18,8 @@ export interface HermesCommandContext {
   coreCommands: ReadonlySet<string>;
   docker: boolean;
   s6: boolean;
+  /** Native Ink result cards are understood; classic CLI output remains terminal-only. */
+  ink?: boolean;
 }
 
 const MAX_FILE_BYTES = 1_048_576;
@@ -307,6 +309,10 @@ export function discoverHermesSkills(cwd: string | null | undefined, context: He
 export function hermesCommands(cwd?: string | null, context?: HermesCommandContext | null): SlashCommand[] {
   return [
     ...HERMES_BUILTIN_COMMANDS.map(command => ({ ...command, source: "builtin" as const })),
+    ...(context?.ink ? [
+      { name: "help", description: "Show native help (visible terminal portion)", source: "builtin" as const },
+      { name: "status", description: "Show native session status with pager controls", source: "builtin" as const },
+    ] : []),
     ...(context ? discoverHermesSkills(cwd, context) : []),
   ];
 }
