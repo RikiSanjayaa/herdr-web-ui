@@ -13,6 +13,7 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   Ink transcripts can resolve a unique process-owned native runtime session.
   Recognized single-skill transcript messages show the user request and a skill chip rather
   than the expanded instructions; native storage and model input stay unchanged.
+  ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)
 - **Two tabs side by side** on a desktop, from different workspaces or PCs: drag a tab down out
   of its strip, or a sidebar row over the pane area, and drop it on the left or right half. A guide
   shows the two halves as soon as the drag starts and keeps its side steady at the centre; Escape
