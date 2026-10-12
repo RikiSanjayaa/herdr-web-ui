@@ -76,6 +76,49 @@ describe("installed Hermes native dialog captures", () => {
     expect(prompt.body).toBe(" printf '%s\\n' native-approval-smoke");
     expect(answerKeys(prompt, { option_index: 3 })).toEqual(["down", "down", "down", "enter"].map((key) => ({ keys: [key] })));
   });
+
+  test("reads the native single clarify question rather than requiring a batch", () => {
+    const prompt = parseInteractivePrompt("hermes", hermesInstalledClarify())!;
+    expect(prompt.question).toBe("Which smoke colour?");
+    expect(labels(prompt)).toEqual(["Red", "Blue"]);
+    expect(prompt.custom_option_index).toBe(2);
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+    expect(answerKeys(prompt, { custom_text: "Purple" })).toEqual([
+      { keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] },
+      { keys: ["ctrl+k"] }, { keys: ["ctrl+u"] }, { text: "Purple" }, { keys: ["enter"] },
+    ]);
+  });
+
+  test("reads native open text and Other text mode, replacing any staged answer", () => {
+    for (const footer of ["Enter send · Esc back · Ctrl+C cancel", "Enter send · Esc cancel · Ctrl+C cancel"]) {
+      const screen = hermesInstalledClarify(0, undefined, "staged answer").replace("Enter send · Esc back · Ctrl+C cancel", footer);
+      const prompt = parseInteractivePrompt("hermes", screen)!;
+      expect(prompt.question).toBe("Which smoke colour?");
+      expect(answerKeys(prompt, { custom_text: "Purple" })).toEqual([
+        { keys: ["ctrl+k"] }, { keys: ["ctrl+u"] }, { text: "Purple" }, { keys: ["enter"] },
+      ]);
+    }
+  });
+
+  test("reads the native 45-column wrapped clarify footer", () => {
+    const screen = hermesInstalledClarify().replace(" · Esc/Ctrl+C cancel", " ·\n Esc/Ctrl+C cancel");
+    const prompt = parseInteractivePrompt("hermes", screen)!;
+    expect(prompt.id).toBe(parseInteractivePrompt("hermes", hermesInstalledClarify())!.id);
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+  });
+
+  test("refuses stale, truncated and malformed native single questions and approvals", () => {
+    for (const screen of [
+      hermesInstalledClarify().replace("▸ 1.", "  1."),
+      hermesInstalledClarify().replace("  2.", "▸ 2."),
+      hermesInstalledClarify().replace("1-2 quick", "1-3 quick"),
+      hermesInstalledClarify().replace("▸ 1. Red", "▸ [ ] 1. Red"),
+      hermesInstalledClarify().replace("Which smoke colour?", "Which smoke…"),
+      hermesInstalledClarify().replace("  2. Blue", "  4. Blue"),
+      hermesInstalledApproval().replace("native-approval-smoke", "native-approval…"),
+      ...[hermesInstalledClarify(), hermesInstalledClarify(0, undefined, ""), hermesInstalledApproval()].flatMap((screen) => [`${screen}\nDone.`, `${screen}\n❯ next message`]),
+    ]) expect(parseInteractivePrompt("hermes", screen)).toBeNull();
+  });
 });
 
 describe("Hermes native approval and confirmation panels", () => {
@@ -3116,12 +3159,44 @@ describe("an answer and the menu it was made for", () => {
     return { status: response.status, code: body.error?.code };
   }
 
+  test("waits for Hermes's editor to render clearing and typing before submitting an answer", async () => {
+    await withPane("hermes", "blocked", hermesInstalledClarify(0, undefined, "staged"), async (pane) => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      let visible = "staged";
+      let pending: string | null = null;
+      let readsLeft = 0;
+      let submitted: string | undefined;
+      pane.onSent = (key) => {
+        if (key === "ctrl+u") { pending = ""; readsLeft = 2; }
+        if (key.startsWith("text:")) { pending = visible + key.slice(5); readsLeft = 2; }
+        if (key === "enter") submitted = visible;
+      };
+      pane.onRead = () => {
+        if (pending !== null && --readsLeft <= 0) { visible = pending; pending = null; }
+        pane.screen = hermesInstalledClarify(0, undefined, visible);
+      };
+      expect(await answer(shown.id, { custom_text: "Purple" })).toEqual({ status: 200, code: undefined });
+      expect(submitted).toBe("Purple");
+    });
+  });
+
+  test("never submits a Hermes answer whose typed text did not reach the visible editor", async () => {
+    await withPane("hermes", "blocked", hermesInstalledClarify(0, undefined, ""), async (pane) => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      expect(await answer(shown.id, { custom_text: "Purple" })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(pane.sent).not.toContain("enter");
+    });
+  });
+
   const hermesCases = [
     { name: "classic approval", draw: hermesClassicApproval, choices: 4, target: 1 },
     { name: "classic confirmation", draw: hermesClassicConfirm, choices: 3, target: 1 },
     { name: "TUI approval", draw: hermesTuiApproval, choices: 4, target: 1 },
     { name: "TUI confirmation", draw: hermesTuiConfirm, choices: 2, target: 0 },
     { name: "installed TUI approval", draw: hermesInstalledApproval, choices: 4, target: 3 },
+    { name: "installed TUI single clarify", draw: hermesInstalledClarify, choices: 3, target: 1 },
   ];
   for (const { name, draw, choices, target } of hermesCases) {
     test(`answers Hermes ${name} from a cursor moved in the terminal, settling every arrow`, async () => {

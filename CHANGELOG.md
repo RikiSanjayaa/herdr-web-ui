@@ -98,6 +98,10 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   delivery never interrupt Codex.
   ([#783](https://github.com/devswha/herdr-web-ui/pull/783) by @kilhyeonjun)
 
+### Fixed
+- Hermes Chat cards recognize the installed TUI's approval footer and single clarification
+  questions, and typed answers wait for the native editor before Enter.
+
 ## [0.4.8] - 2026-10-12
 
 ### Added

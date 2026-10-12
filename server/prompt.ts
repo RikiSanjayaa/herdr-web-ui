@@ -137,6 +137,8 @@ type ParsedPrompt = InteractivePrompt & {
   selectedIndex: number;
   checkedOptionIndices: number[];
   customMenuIndex: number | null;
+  /** Native editor rows, retained only to settle Hermes's typed-answer steps. */
+  hermesInputRows?: readonly string[];
   rejectWithEscapeIndex: number | null;
   /** each option's own steps, for a card whose options are not rows of a menu */
   optionSteps?: AnswerStep[][];
@@ -2014,9 +2016,16 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   const ends = (re: RegExp): boolean => [1, 2, 3].some((span) =>
     re.test(shown.slice(-span).join(" ")) && (span === 1 || !re.test(shown.slice(-span, -1).join(" "))));
   if (prompt.responder === "omp-question") return ends(OMP_SINGLE_HINT_RE) || ends(OMP_MULTI_HINT_RE);
-  // Hermes keeps its status line (and maybe the hint's wrapped tail) under the hint; an answered
-  // question leaves the screen, so a hint among the last few lines is the live one
-  if (prompt.responder === "hermes-question" || prompt.responder === "hermes-input") return shown.slice(-4).some((line) => HERMES_HINT_RE.test(line));
+  // Single-question readers validate their complete native footer and status-only tail;
+  // batch questions keep the answered-count footer near the bottom of the screen.
+  if (prompt.responder === "hermes-question" || prompt.responder === "hermes-input") {
+    if (shown.slice(-4).some((line) => HERMES_HINT_RE.test(line))) return true;
+    const tail = shown.slice(-6);
+    return tail.some((_, index) => [1, 2, 3, 4].some((span) => {
+      const hint = tail.slice(index, index + span).join(" ");
+      return HERMES_SINGLE_HINT_RE.test(hint) || HERMES_INPUT_HINT_RE.test(hint);
+    }));
+  }
   // Approval and confirmation readers validate the complete native panel and its tail.
   if (prompt.responder.startsWith("hermes-")) return true;
   if (prompt.responder === "codex-menu") return ends(CODEX_CONTINUE_HINT_RE);
@@ -2359,11 +2368,52 @@ const HERMES_HINT_RE = /^(\d+)\/(\d+) answered · /;
 const HERMES_ASK_RE = /^ask \d+ questions?$/;
 const HERMES_ROW_RE = /^(▸ )?(\[[ x]\] )?(\d+)\. (.+)$/;
 const HERMES_OTHER = "Other (type your answer)";
+const HERMES_SINGLE_HINT_RE = /^↑\/↓ select · Enter confirm · 1-(\d+) quick pick · Esc\/Ctrl\+C cancel$/;
+const HERMES_INPUT_HINT_RE = /^Enter send · Esc (?:back|cancel) · (?:Cmd\+C copy · Cmd\+V paste · )?Ctrl\+C cancel$/;
+
+/** The installed TUI renders a single clarify request without the batch header,
+ * active-question marker or answered count. Its text editor has its own footer. */
+function parseHermesSingleClarify(lines: string[]): ParsedPrompt | null {
+  let hintIndex = -1;
+  let hintEnd = -1;
+  let hint = "";
+  for (let index = lines.length - 1; index >= 0 && hintIndex < 0; index -= 1) {
+    for (let span = 1; span <= 4 && index + span <= lines.length; span += 1) {
+      const candidate = lines.slice(index, index + span).map((line) => line.trim()).join(" ");
+      if (HERMES_SINGLE_HINT_RE.test(candidate) || HERMES_INPUT_HINT_RE.test(candidate)) {
+        hintIndex = index;
+        hintEnd = index + span;
+        hint = candidate;
+        break;
+      }
+    }
+  }
+  if (hintIndex < 0 || !hermesTail(lines, hintEnd - 1, false, false)) return null;
+  const askIndex = findLastIndex(lines.slice(0, hintIndex), (line) => /^ask \S/.test(line.trim()));
+  if (askIndex < 0) return null;
+  const block = lines.slice(askIndex, hintIndex).map((line) => line.trim()).filter(Boolean);
+  if (block.some((line) => HERMES_TRUNCATED_RE.test(line))) return null;
+  const first = block.findIndex((line, index) => index > 0 && (HERMES_ROW_RE.test(line) || /^>/.test(line)));
+  if (first < 1) return null;
+  const question = block.slice(0, first).join(" ").slice(4);
+  const member = block.slice(first);
+  if (HERMES_INPUT_HINT_RE.test(hint)) {
+    if (!member[0]?.startsWith(">") || member.slice(1).some((line) => HERMES_ROW_RE.test(line))) return null;
+  } else {
+    if (member.some((line) => /^>/.test(line))) return null;
+    const rows = member.filter((line) => HERMES_ROW_RE.test(line));
+    // Single-question Ink dialogs have no checkbox behavior. Only the native batch
+    // reader may expose multi-select steps.
+    if (rows.some((line) => HERMES_ROW_RE.exec(line)?.[2])) return null;
+    if (Number(HERMES_SINGLE_HINT_RE.exec(hint)![1]) !== rows.length - 1) return null;
+  }
+  return hermesClarifyQuestion(question, null, member);
+}
 
 function parseHermesClarify(screen: string): ParsedPrompt | null {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map((line) => line.trimEnd());
   const hintIndex = findLastIndex(lines, (line) => HERMES_HINT_RE.test(line.trim()));
-  if (hintIndex < 0) return null;
+  if (hintIndex < 0) return parseHermesSingleClarify(lines);
   const askIndex = findLastIndex(lines.slice(0, hintIndex), (line) => HERMES_ASK_RE.test(line.trim()));
   if (askIndex < 0) return null;
   const block = lines.slice(askIndex + 1, hintIndex).filter((line) => line.trim());
@@ -2379,6 +2429,11 @@ function parseHermesClarify(screen: string): ParsedPrompt | null {
   for (let i = end; i < block.length && indent(block[i]!) > base; i += 1) member.push(block[i]!.trim());
   const [answered, total] = lines[hintIndex]!.trim().match(HERMES_HINT_RE)!.slice(1).map(Number);
   const body = total! > 1 ? `${answered}/${total} answered` : null;
+  return hermesClarifyQuestion(question, body, member);
+}
+
+function hermesClarifyQuestion(question: string, body: string | null, member: string[]): ParsedPrompt | null {
+  if (!question) return null;
   // text already on the `>` line (typed in the terminal, or a typed answer Tab brought back)
   // would join the answer: the line is emptied first, after the cursor and before it (its
   // TextInput's ctrl+k and ctrl+u, on every platform)
@@ -2389,6 +2444,7 @@ function parseHermesClarify(screen: string): ParsedPrompt | null {
       options: [{ label: "Type your answer", description: null }], multi_select: false, custom_option_index: 0,
     }, {
       responder: "hermes-input", menuLabels: [], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: 0,
+      hermesInputRows: member,
       rejectWithEscapeIndex: null, customSteps: typed,
     });
   }
@@ -2396,12 +2452,12 @@ function parseHermesClarify(screen: string): ParsedPrompt | null {
   for (const line of member) {
     const row = line.match(HERMES_ROW_RE);
     if (row && Number(row[3]) === rows.length + 1) rows.push({ label: row[4]!, selected: Boolean(row[1]), box: Boolean(row[2]), checked: row[2] === "[x] " });
-    else if (rows.length) rows.at(-1)!.label += ` ${line}`; // a label wrapped onto the next line
+    else if (rows.length && !row) rows.at(-1)!.label += ` ${line}`; // a label wrapped onto the next line
     else return null;
   }
   if (rows.length < 2 || rows.at(-1)!.label !== HERMES_OTHER) return null;
   const selectedIndex = rows.findIndex((row) => row.selected);
-  if (selectedIndex < 0) return null;
+  if (selectedIndex < 0 || rows.filter((row) => row.selected).length !== 1) return null;
   const choices = rows.slice(0, -1);
   // a multi-select question draws a box on every choice; its Other row has none
   const multi = choices.every((row) => row.box);
@@ -3563,6 +3619,18 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
             await Bun.sleep(50);
           }
         };
+        const onHermesInput = (text?: string): Promise<boolean> => onRow((shown) => {
+          if (shown?.responder !== "hermes-input" || shown.question !== parsed.question || shown.body !== parsed.body || !shown.hermesInputRows) return false;
+          if (text === undefined) return true;
+          let offset = 0;
+          for (let row = 0; row < shown.hermesInputRows.length; row += 1) {
+            const value = (row === 0 ? shown.hermesInputRows[row]!.slice(1) : shown.hermesInputRows[row]!).trim();
+            if (!text.startsWith(value, offset)) return false;
+            offset += value.length;
+            while (offset < text.length && /\s/u.test(text[offset]!)) offset += 1;
+          }
+          return offset === text.length;
+        });
         // whether a move of this answer has gone out
         let walked = false;
         for (let index = 0; index < steps.length; index += 1) {
@@ -3594,6 +3662,13 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           // none where no look was taken or the row names no key this reader knows
           const key: AnswerStep | null = step.pick ? (seen as ParsedPrompt | null)?.rowKey ?? null : step;
           if (key === null) return promptChanged();
+          // Ink's rendered editor can lag a key receipt. Never append to an uncleared
+          // answer or let Enter submit the previous React value.
+          if (agent === "hermes" && body.custom_text !== undefined) {
+            if (key.keys?.[0] === "ctrl+k" && !(await onHermesInput())) return promptChanged();
+            if (key.text !== undefined && !(await onHermesInput(""))) return promptChanged();
+            if (index === steps.length - 1 && key.keys?.[0] === KEY.enter && !(await onHermesInput(body.custom_text.trim()))) return promptChanged();
+          }
           const first = !move && !committed;
           if (!move) committed = true;
           try {
