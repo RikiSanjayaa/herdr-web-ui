@@ -33,6 +33,154 @@ const claudeBackgroundApproval = (selected: number, footer = CLAUDE_BACKGROUND_A
   ].join("\n");
 };
 
+// Hermes v0.21 native renderers: cli.py's prompt_toolkit fragments and
+// ui-tui/src/components/prompts.tsx. /clear's classic tail was also captured live.
+const HERMES_RULE = "─".repeat(100);
+const HERMES_CLASSIC_CHOICES = ["Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"];
+const HERMES_TUI_CHOICES = ["Allow once", "Allow this session", "Always allow", "Deny"];
+function hermesClassicApproval(at = 0, command = "rm -rf /tmp/hermes-smoke", detail = "recursive delete", choices = HERMES_CLASSIC_CHOICES, seconds = 299): string {
+  const content = ["⚠️  Dangerous Command", "", ...command.split("\n"), "", ...choices.map((label, index) => `${at === index ? "❯" : " "} ${index + 1}. ${label}`), "", ...detail.split("\n")];
+  return [`╭${"─".repeat(74)}╮`, ...content.map((line) => `│ ${line.padEnd(72)} │`), `╰${"─".repeat(74)}╯`, "", `  ↑/↓ to select, Enter to confirm  (${seconds}s)`, " ⚕ smoke-model │ ctx -- │ [░░░░░░░░░░] -- │ 5s │ ⏲ 0s", HERMES_RULE, "⚠ ❯", HERMES_RULE].join("\n");
+}
+function hermesClassicConfirm(at = 0, detail = "This clears the screen and starts a new session.\nThe current conversation history will be discarded.", seconds = 119, input = "type 1/2/3, or use ↑/↓ then Enter"): string {
+  const choices = ["Approve Once — proceed this time only", "Always Approve — proceed and silence this prompt permanently", "Cancel — keep current conversation"];
+  const content = ["⚠️  /clear — destroys conversation state", "", ...detail.split("\n"), "", ...choices.map((label, index) => `${at === index ? "❯" : " "} [${index + 1}] ${label}`), "", "Type 1/2/3 or use ↑/↓ then Enter. ESC/Ctrl+C cancels."];
+  return [`╭${"─".repeat(84)}╮`, ...content.map((line) => `│ ${line.padEnd(82)} │`), `╰${"─".repeat(84)}╯`, "", `  type 1/2/3, or ↑/↓ to select, Enter to confirm  (${seconds}s)`, " ⚕ smoke-model │ ctx -- │ [░░░░░░░░░░] -- │ 5s │ ⏲ 0s", HERMES_RULE, `⚠ ❯ ${input}`, HERMES_RULE].join("\n");
+}
+function hermesTuiApproval(at = 0, command = "rm -rf /tmp/hermes-smoke", detail = "recursive delete", choices = HERMES_TUI_CHOICES): string {
+  const content = [`⚠ approval required · ${detail}`, ...command.split("\n"), "", ...choices.map((label, index) => `${at === index ? "▸" : " "} ${index + 1}. ${label}`), `↑/↓ select · Enter confirm · 1-${choices.length} quick pick · Esc/Ctrl+C deny`];
+  return [`╔${"═".repeat(98)}╗`, ...content.map((line) => `║ ${line.padEnd(96)} ║`), `╚${"═".repeat(98)}╝`, "", "─ ~/app │ smoke-model │ approval needed ─"].join("\n");
+}
+function hermesTuiConfirm(at = 0, detail = "This ends the current conversation and clears the transcript."): string {
+  const content = ["⚠ Start a new session?", detail, `${at === 0 ? "▸" : " "} No, keep going`, `${at === 1 ? "▸" : " "} Yes, start a new session`, "↑/↓ select · Enter confirm · Y/N quick · Esc cancel"];
+  return [`╔${"═".repeat(98)}╗`, ...content.map((line) => `║ ${line.padEnd(96)} ║`), `╚${"═".repeat(98)}╝`, "", "─ ~/app │ smoke-model │ idle ─"].join("\n");
+}
+
+// Captured from the installed ui-tui/dist/components/prompts.js through real Ink
+// in an isolated 100-column PTY. Its older approval footer omits Esc/.
+function hermesInstalledApproval(at = 0, command = " printf '%s\\n' native-approval-smoke"): string {
+  return hermesTuiApproval(at, command, "Harmless renderer-only approval").replace("Esc/Ctrl+C deny", "Ctrl+C deny");
+}
+function hermesInstalledClarify(at = 0, question = "Which smoke colour?", input: string | null = null): string {
+  return [`ask ${question}`, ...(input === null
+    ? ["Red", "Blue", "Other (type your answer)"].map((label, index) => `${at === index ? "▸" : " "} ${index + 1}. ${label}`)
+    : [`> ${input}`]), input === null
+    ? "↑/↓ select · Enter confirm · 1-2 quick pick · Esc/Ctrl+C cancel"
+    : "Enter send · Esc back · Ctrl+C cancel", "─ native isolated smoke │ no provider calls ─"].join("\n");
+}
+
+describe("installed Hermes native dialog captures", () => {
+  test("reads the installed approval footer and navigates to Deny", () => {
+    const prompt = parseInteractivePrompt("hermes", hermesInstalledApproval())!;
+    expect(labels(prompt)).toEqual(HERMES_TUI_CHOICES);
+    expect(prompt.body).toBe(" printf '%s\\n' native-approval-smoke");
+    expect(answerKeys(prompt, { option_index: 3 })).toEqual(["down", "down", "down", "enter"].map((key) => ({ keys: [key] })));
+  });
+});
+
+describe("Hermes native approval and confirmation panels", () => {
+  test("reads the native default TUI /clear capture, including its harmless repaint artifact", () => {
+    // Captured from an isolated HERMES_HOME, no provider calls. The ╯ in the title is
+    // a native repaint artifact and remains in identity rather than being normalized away.
+    const screen = ` ╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+ ║ ⚠ Clear the current session?                                                                                     ╯║
+ ║  This ends the current conversation and clears the transcript.                                                     ║
+ ║ ▸ No, keep going                                                                                                   ║
+ ║   Yes, clear the session                                                                                           ║
+ ║ ↑/↓ select · Enter confirm · Y/N quick · Esc cancel                                                                ║
+ ╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+
+
+ ─ ready │ smoke model │ 24s │ voice off │ 1 session                                     ─ …/hermes-smoke`;
+    const prompt = parseInteractivePrompt("hermes", screen)!;
+    expect(labels(prompt)).toEqual(["No, keep going", "Yes, clear the session"]);
+    expect(prompt.body).toBe(" This ends the current conversation and clears the transcript.");
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+  });
+
+  test("reads both native renderers and sends arrows plus Enter, never numeric shortcuts", () => {
+    const cases = [
+      { screen: hermesClassicApproval(1), choices: HERMES_CLASSIC_CHOICES, index: 2, keys: ["down", "enter"] },
+      { screen: hermesClassicConfirm(2), choices: ["Approve Once", "Always Approve", "Cancel"], index: 0, keys: ["up", "up", "enter"] },
+      { screen: hermesTuiApproval(2), choices: HERMES_TUI_CHOICES, index: 3, keys: ["down", "enter"] },
+      { screen: hermesTuiConfirm(1), choices: ["No, keep going", "Yes, start a new session"], index: 0, keys: ["up", "enter"] },
+    ];
+    for (const { screen, choices, index, keys } of cases) {
+      const prompt = parseInteractivePrompt("hermes", screen)!;
+      expect(prompt).not.toBeNull();
+      expect(prompt.agent).toBe("hermes");
+      expect(labels(prompt)).toEqual(choices);
+      expect(answerKeys(prompt, { option_index: index })).toEqual(keys.map((key) => ({ keys: [key] })));
+      expect(() => answerKeys(prompt, { custom_text: "always" })).toThrow();
+    }
+  });
+
+  test("includes commands, descriptions and confirmation effects in identity, but not cursor or timeout", () => {
+    const approval = parseInteractivePrompt("hermes", hermesClassicApproval())!;
+    expect(approval.body).toBe("rm -rf /tmp/hermes-smoke\nrecursive delete");
+    expect(parseInteractivePrompt("hermes", hermesClassicApproval(3, undefined, undefined, undefined, 123))!.id).toBe(approval.id);
+    const indented = parseInteractivePrompt("hermes", hermesClassicApproval(0, "cat <<'EOF'\n  important indentation\nEOF"))!;
+    expect(indented.body).toContain("\n  important indentation\n");
+    expect(indented.id).not.toBe(parseInteractivePrompt("hermes", hermesClassicApproval(0, "cat <<'EOF'\nimportant indentation\nEOF"))!.id);
+    expect(parseInteractivePrompt("hermes", hermesClassicApproval(0, "rm -rf /tmp/other"))!.id).not.toBe(approval.id);
+    expect(parseInteractivePrompt("hermes", hermesClassicApproval(0, undefined, "delete another folder"))!.id).not.toBe(approval.id);
+    const confirm = parseInteractivePrompt("hermes", hermesClassicConfirm())!;
+    expect(confirm.options[1]?.description).toBe("proceed and silence this prompt permanently");
+    expect(parseInteractivePrompt("hermes", hermesClassicConfirm(2, undefined, 23))!.id).toBe(confirm.id);
+    expect(parseInteractivePrompt("hermes", hermesClassicConfirm(0, "This discards a different conversation."))!.id).not.toBe(confirm.id);
+    expect(parseInteractivePrompt("hermes", hermesTuiApproval(3))!.id).toBe(parseInteractivePrompt("hermes", hermesTuiApproval())!.id);
+    expect(parseInteractivePrompt("hermes", hermesTuiConfirm(1))!.id).toBe(parseInteractivePrompt("hermes", hermesTuiConfirm())!.id);
+  });
+
+  test("supports native reduced approval choices and safe view expansion", () => {
+    for (const choices of [["Allow once", "Deny"], ["Allow once", "Allow for this session", "Deny"], [...HERMES_CLASSIC_CHOICES, "Show full command"]]) {
+      expect(labels(parseInteractivePrompt("hermes", hermesClassicApproval(0, undefined, undefined, choices)))).toEqual(choices);
+    }
+    expect(labels(parseInteractivePrompt("hermes", hermesTuiApproval(0, undefined, undefined, ["Allow once", "Deny"])))).toEqual(["Allow once", "Deny"]);
+    expect(labels(parseInteractivePrompt("hermes", hermesTuiApproval(0, undefined, undefined, ["Allow once", "Allow this session", "Deny"])))).toEqual(["Allow once", "Allow this session", "Deny"]);
+  });
+
+  test("refuses hidden command identity, truncated details, malformed cursors and typed confirmation aliases", () => {
+    const classic = hermesClassicApproval();
+    const tui = hermesTuiApproval();
+    for (const screen of [
+      hermesClassicApproval(0, undefined, undefined, undefined, 0),
+      hermesClassicConfirm(0, undefined, 0),
+      hermesClassicApproval(0, "rm -rf /tmp/a\n… (choose Show full command)", undefined, [...HERMES_CLASSIC_CHOICES, "Show full command"]),
+      hermesClassicApproval(0, "rm -rf /tmp/a\n… (command truncated — use /logs or /debug for full text)"),
+      hermesClassicApproval(0, undefined, "recursive delete\n… (description truncated)"),
+      hermesClassicConfirm(0, "This discards history.\n… (detail truncated)"),
+      hermesTuiApproval(0, "rm -rf /tmp/a\n… +2 more lines (full text above)"),
+      hermesTuiConfirm(0, "This ends the current conversation…"),
+      hermesClassicConfirm(0, undefined, undefined, "always"),
+      classic.replace("❯ 1.", "  1."),
+      tui.replace("  2. Allow", "▸ 2. Allow"),
+      classic.replace("│   4. Deny", "│   5. Deny"),
+      tui.replace("1-4 quick", "1-3 quick"),
+      "Should I proceed? (y/n)",
+    ]) expect(parseInteractivePrompt("hermes", screen)).toBeNull();
+  });
+
+  test("does not read completed/logged panels or a panel above an ordinary composer as live", () => {
+    for (const screen of [hermesClassicApproval(), hermesClassicConfirm(), hermesTuiApproval(), hermesTuiConfirm()]) {
+      expect(parseInteractivePrompt("hermes", `${screen}\n⚠ Approval: rm -rf /tmp/hermes-smoke → allowed once\n❯ next message`)).toBeNull();
+      expect(parseInteractivePrompt("hermes", `${screen}\nDone.`)).toBeNull();
+    }
+    expect(parseInteractivePrompt("hermes", hermesClassicConfirm().replace("⚠ ❯", "❯"))).toBeNull();
+    expect(parseInteractivePrompt("hermes", `${hermesTuiConfirm()}\n❯ `)).toBeNull();
+  });
+
+  test("joins wrapped native key hints without putting the hint in the command identity", () => {
+    const screen = hermesTuiApproval();
+    const wrapped = screen.replace(/║ ↑\/↓ select · Enter confirm · 1-4 quick pick · Esc\/Ctrl\+C deny +║/, "║ ↑/↓ select · Enter confirm · 1-4 quick pick ║\n║ · Esc/Ctrl+C deny ║");
+    expect(parseInteractivePrompt("hermes", wrapped)!.id).toBe(parseInteractivePrompt("hermes", screen)!.id);
+    const classic = hermesClassicConfirm();
+    const wrappedClassic = classic.replace("  type 1/2/3, or ↑/↓ to select, Enter to confirm  (119s)", "  type 1/2/3, or ↑/↓ to select,\n  Enter to confirm  (119s)");
+    expect(parseInteractivePrompt("hermes", wrappedClassic)!.id).toBe(parseInteractivePrompt("hermes", classic)!.id);
+  });
+});
+
 describe("interactive prompt parsing", () => {
   test("invalidates approvals when their command changes, including text beyond the display cap", () => {
     const screen = (command: string, secondSelected = false) => `
@@ -2967,6 +3115,138 @@ describe("an answer and the menu it was made for", () => {
     const body = await response.json() as { error?: { code: string } };
     return { status: response.status, code: body.error?.code };
   }
+
+  const hermesCases = [
+    { name: "classic approval", draw: hermesClassicApproval, choices: 4, target: 1 },
+    { name: "classic confirmation", draw: hermesClassicConfirm, choices: 3, target: 1 },
+    { name: "TUI approval", draw: hermesTuiApproval, choices: 4, target: 1 },
+    { name: "TUI confirmation", draw: hermesTuiConfirm, choices: 2, target: 0 },
+    { name: "installed TUI approval", draw: hermesInstalledApproval, choices: 4, target: 3 },
+  ];
+  for (const { name, draw, choices, target } of hermesCases) {
+    test(`answers Hermes ${name} from a cursor moved in the terminal, settling every arrow`, async () => {
+      await withPane("hermes", "blocked", draw(0), async (pane) => {
+        promptWaitEnded("p_1");
+        const shown = (await card())!;
+        let at = choices - 1;
+        pane.screen = draw(at);
+        pane.onSent = (key) => {
+          if (key === "up") at = Math.max(0, at - 1);
+          if (key === "down") at = Math.min(choices - 1, at + 1);
+          pane.screen = draw(at);
+        };
+        expect(await answer(shown.id, { option_index: target })).toEqual({ status: 200, code: undefined });
+        expect(pane.sent).toEqual([...Array.from({ length: choices - 1 - target }, () => "up"), "enter"]);
+        expect(pane.sent.some((key) => key.startsWith("text:") || /^\d+$/.test(key))).toBe(false);
+        expect(await card()).toBeNull();
+        expect(await answer(shown.id, { option_index: target })).toEqual({ status: 409, code: "prompt_changed" });
+      });
+    });
+
+    test(`sends no keys for a stale Hermes ${name} card`, async () => {
+      await withPane("hermes", "blocked", draw(0), async (pane) => {
+        promptWaitEnded("p_1");
+        const shown = (await card())!;
+        pane.screen = draw(0, "Different command or destructive effect");
+        expect(await answer(shown.id, { option_index: target })).toEqual({ status: 409, code: "prompt_changed" });
+        expect(pane.sent).toEqual([]);
+        const next = (await card())!;
+        pane.screen = "Ready\n❯ ";
+        expect(await card()).toBeNull();
+        pane.screen = draw(0, "Different command or destructive effect");
+        expect(await answer(next.id, { option_index: target })).toEqual({ status: 409, code: "prompt_changed" });
+        expect(pane.sent).toEqual([]);
+      });
+    });
+
+    test(`never commits a Hermes ${name} after its row or panel changed under navigation`, async () => {
+      await withPane("hermes", "blocked", draw(0), async (pane) => {
+        promptWaitEnded("p_1");
+        const shown = (await card())!;
+        pane.onSent = (key) => { if (key === "down") pane.screen = draw(0); };
+        expect(await answer(shown.id, { option_index: 1 })).toEqual({ status: 409, code: "prompt_changed" });
+        expect(pane.sent).toEqual(["down"]);
+      });
+      await withPane("hermes", "blocked", draw(0), async (pane) => {
+        promptWaitEnded("p_1");
+        const shown = (await card())!;
+        pane.onSent = (key) => { if (key === "down") pane.screen = "⏱ Timeout — denying command\n❯ "; };
+        expect(await answer(shown.id, { option_index: 1 })).toEqual({ status: 409, code: "prompt_changed" });
+        expect(pane.sent).toEqual(["down"]);
+      });
+    }, 10_000);
+  }
+
+  test("revalidates Hermes's already-selected option before Enter, even without an arrow", async () => {
+    for (const { draw } of hermesCases) await withPane("hermes", "blocked", draw(0), async (pane) => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      let reads = 0;
+      pane.onRead = () => { if (++reads > 1) pane.screen = "Ready\n❯ "; };
+      expect(await answer(shown.id, { option_index: 0 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(pane.sent).toEqual([]);
+    });
+  }, 10_000);
+
+  test("sends no key for a Hermes approval whose displayed timeout has expired", async () => {
+    await withPane("hermes", "blocked", hermesClassicApproval(), async (pane) => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      pane.screen = hermesClassicApproval(0, undefined, undefined, undefined, 0);
+      expect(await answer(shown.id, { option_index: 0 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(pane.sent).toEqual([]);
+    });
+  });
+
+  test("waits for Hermes redraw and cursor settlement before confirming", async () => {
+    await withPane("hermes", "blocked", hermesClassicApproval(), async (pane) => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      pane.onSent = (key) => {
+        if (key !== "down") return;
+        pane.screen = hermesClassicApproval(1, undefined, undefined, undefined, 295);
+        pane.nextRead = { text: "╭──────╮\n│ ⚠️  Dangerous Command │", delay: 50 };
+      };
+      expect(await answer(shown.id, { option_index: 1 })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["down", "enter"]);
+      pane.screen = hermesClassicApproval(1, undefined, undefined, undefined, 293);
+      expect(await card()).toBeNull();
+      expect(await answer(shown.id, { option_index: 1 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(pane.sent).toEqual(["down", "enter"]);
+      promptWaitEnded("p_1");
+      expect((await card())!.id).not.toBe(shown.id);
+    });
+  });
+
+  test("a Hermes view action only expands the native command and retires the earlier card", async () => {
+    const command = "printf '%s' 'the full command is visible here, despite exceeding\nseventy characters'";
+    const choices = [...HERMES_CLASSIC_CHOICES, "Show full command"];
+    await withPane("hermes", "blocked", hermesClassicApproval(0, command, undefined, choices), async (pane) => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      let at = 0;
+      pane.onSent = (key) => {
+        if (key === "down") pane.screen = hermesClassicApproval(++at, command, undefined, choices);
+        if (key === "enter") pane.screen = hermesClassicApproval(3, command);
+      };
+      expect(await answer(shown.id, { option_index: 4 })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["down", "down", "down", "down", "enter"]);
+      expect(await answer(shown.id, { option_index: 0 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(labels(await card())).toEqual(HERMES_CLASSIC_CHOICES);
+    });
+  });
+
+  test("keeps truncated, typed-alias and unsupported Hermes waits in Terminal, without generic approval keys", async () => {
+    for (const screen of [
+      hermesClassicApproval(0, "rm -rf /tmp/a\n… (choose Show full command)", undefined, [...HERMES_CLASSIC_CHOICES, "Show full command"]),
+      hermesTuiApproval(0, "rm -rf /tmp/a\n… +2 more lines (full text above)"),
+      hermesClassicConfirm(0, undefined, undefined, "always"),
+      "Unsupported native prompt\n1. Approve\n2. Deny\nEnter to confirm",
+    ]) await withPane("hermes", "blocked", screen, async () => {
+      promptWaitEnded("p_1");
+      expect(await card()).toBeNull();
+    });
+  });
 
   const omoRule = "─".repeat(100);
   const omoWidget = (box = "❯") => `? Question pending (1 unanswered) · 30m

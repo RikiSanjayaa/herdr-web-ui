@@ -121,6 +121,10 @@ type Responder =
   | "pi-model"
   | "hermes-question"
   | "hermes-input"
+  | "hermes-classic-approval"
+  | "hermes-classic-confirm"
+  | "hermes-tui-approval"
+  | "hermes-tui-confirm"
   | "fallback-menu"
   | "fallback-gjc-menu"
   | "fallback-keys";
@@ -1184,6 +1188,130 @@ function parseOmpApproval(screen: string): ParsedPrompt | null {
     rejectWithEscapeIndex: null,
   });
 }
+/** Hermes v0.21: cli.py's rounded prompt_toolkit panels and ui-tui's double-border prompts.
+ * Read the entire panel, never a logged summary or a command preview hiding its tail. */
+const HERMES_CLASSIC_APPROVAL_HINT = /^↑\/↓ to select, Enter to confirm\s+\([1-9]\d*s\)$/;
+const HERMES_CLASSIC_CONFIRM_HINT = /^type 1\/2\/3, or ↑\/↓ to select, Enter to confirm\s+\([1-9]\d*s\)$/;
+const HERMES_TUI_APPROVAL_HINT = /^↑\/↓ select · Enter confirm · 1-(\d) quick pick · (?:Esc\/)?Ctrl\+C deny$/;
+const HERMES_TUI_CONFIRM_HINT = "↑/↓ select · Enter confirm · Y/N quick · Esc cancel";
+const HERMES_CONFIRM_PANEL_HINT = "Type 1/2/3 or use ↑/↓ then Enter. ESC/Ctrl+C cancels.";
+const HERMES_TRUNCATED_RE = /…|\(command truncated|\(description truncated|\(detail truncated/;
+
+function hermesLine(line: string): string {
+  return line.replace(ANSI_RE, "").trim().replace(/^[│║]\s?/, "").replace(/\s?[│║]$/, "").trim();
+}
+
+/** Only native chrome may follow the panel. Classic confirmations also reject a typed answer:
+ * their Enter handler prefers a typed alias over the highlighted row. */
+function hermesTail(lines: string[], end: number, classic: boolean, confirmation: boolean): boolean {
+  const tail = lines.slice(end + 1).map(hermesLine).filter(Boolean);
+  if (!classic) return tail.length <= 2 && tail.every((line) => /^─(?:\s|─)/.test(line));
+  const hint = confirmation ? HERMES_CLASSIC_CONFIRM_HINT : HERMES_CLASSIC_APPROVAL_HINT;
+  let hintEnd = -1;
+  for (let span = 1; span <= Math.min(4, tail.length); span += 1) {
+    if (hint.test(tail.slice(0, span).join(" "))) { hintEnd = span; break; }
+  }
+  if (hintEnd < 0) return false;
+  const rest = tail.slice(hintEnd);
+  let composer = false;
+  for (const line of rest) {
+    if (/^─+$/.test(line) || /^⚕\s/.test(line)) continue;
+    const input = line.match(/^⚠\s*[❯›>]\s*(.*)$/);
+    if (!input || composer) return false;
+    composer = true;
+    if (confirmation && input[1] !== "type 1/2/3, or use ↑/↓ then Enter" && input[1] !== "") return false;
+  }
+  return rest.length <= 6 && composer;
+}
+
+function parseHermesPrompt(screen: string): ParsedPrompt | null {
+  const raw = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  const start = findLastIndex(raw, (line) => /^\s*[╭╔][─═]+[╮╗]\s*$/.test(line));
+  if (start < 0) return null;
+  const classic = raw[start]!.trim().startsWith("╭");
+  const end = raw.findIndex((line, index) => index > start && (classic ? /^\s*╰─+╯\s*$/ : /^\s*╚═+╝\s*$/).test(line));
+  if (end < 0 || raw.slice(start + 1, end).some((line) => !(classic ? /^\s*│.*│\s*$/ : /^\s*║.*║\s*$/).test(line))) return null;
+  const panel = raw.slice(start + 1, end).map(hermesLine);
+  // Remove only the renderer's border padding. Leading whitespace in a multiline shell
+  // command can be meaningful and must not collide with an otherwise identical command.
+  const content = raw.slice(start + 1, end).map((line) => line.replace(/^\s*[│║] ?/, "").replace(/ ?[│║]\s*$/, "").trimEnd());
+  const title = panel[0] ?? "";
+  const approval = classic ? /^⚠️?\s+Dangerous Command$/.test(title) : /^⚠ approval required · \S/.test(title);
+  const confirmation = !approval;
+  if (!hermesTail(raw, end, classic, confirmation)) return null;
+  if (panel.some((line) => HERMES_TRUNCATED_RE.test(line))) return null;
+  let footer = panel.length;
+  let hint: string | null = null;
+  if (confirmation || !classic) {
+    for (let span = 1; span <= Math.min(5, panel.length); span += 1) {
+      const candidate = normalizeText(panel.slice(-span).join(" "));
+      if (classic ? candidate === HERMES_CONFIRM_PANEL_HINT : approval ? HERMES_TUI_APPROVAL_HINT.test(candidate) : candidate === HERMES_TUI_CONFIRM_HINT) {
+        footer = panel.length - span;
+        hint = candidate;
+        break;
+      }
+    }
+    if (hint === null || (!approval && !classic && !/^[⚠?] \S/.test(title))) return null;
+  }
+  const rowShape = classic && confirmation ? /^(❯)?\s*\[(\d+)\]\s+(.+)$/ : /^(❯|▸)?\s*(\d+)\.\s+(.+)$/;
+  const first = panel.findIndex((line) => rowShape.test(line));
+  let rows: { label: string; description: string | null; selected: boolean }[] = [];
+  let last = first;
+  if (!classic && confirmation) {
+    // ConfirmPrompt renders two unnumbered rows immediately before its footer. Ink may
+    // omit the empty Text separator, as in the live default-TUI /clear capture.
+    const candidates = panel.slice(1, footer).map((line, index) => ({ line, index: index + 1 })).filter(({ line }) => line);
+    const pair = candidates.slice(-2);
+    if (pair.length !== 2 || pair[1]!.index !== pair[0]!.index + 1) return null;
+    rows = pair.map(({ line }) => ({ label: line.replace(/^▸\s*/, ""), description: null, selected: line.startsWith("▸ ") }));
+    last = pair[1]!.index;
+    const body = content.slice(1, pair[0]!.index).filter((line) => line.trim()).join("\n");
+    return hermesPrompt(title, body, rows, "hermes-tui-confirm");
+  }
+  if (first < 1) return null;
+  for (let index = first; index < footer; index += 1) {
+    const match = panel[index]!.match(rowShape);
+    if (!match) {
+      if (!panel[index]) break;
+      const previous = rows.at(-1);
+      if (!previous || !/^\s*[│║] {4,}\S/.test(raw[start + 1 + index]!)) break;
+      previous.label += ` ${panel[index]}`;
+      last = index;
+      continue;
+    }
+    if (Number(match[2]) !== rows.length + 1) return null;
+    rows.push({ label: match[3]!, description: null, selected: Boolean(match[1]) });
+    last = index;
+  }
+  if (approval) {
+    const allowed = classic ? ["Allow once", "Allow for this session", "Add to permanent allowlist", "Deny", "Show full command"] : ["Allow once", "Allow this session", "Always allow", "Deny"];
+    if (rows[0]?.label !== allowed[0] || !rows.some((row) => row.label === "Deny") || rows.some((row) => !allowed.includes(row.label))) return null;
+    const order = rows.map((row) => allowed.indexOf(row.label));
+    if (order.some((value, index) => index > 0 && value <= order[index - 1]!)) return null;
+    if (!classic && Number(HERMES_TUI_APPROVAL_HINT.exec(hint ?? "")?.[1]) !== rows.length) return null;
+  } else {
+    for (const row of rows) {
+      const split = row.label.indexOf(" — ");
+      if (split < 1) return null;
+      row.description = row.label.slice(split + 3);
+      row.label = row.label.slice(0, split);
+    }
+  }
+  const body = [...content.slice(1, first), ...(approval ? content.slice(last + 1, footer) : [])].filter((line) => line.trim()).join("\n");
+  return hermesPrompt(title, body, rows, classic ? approval ? "hermes-classic-approval" : "hermes-classic-confirm" : "hermes-tui-approval");
+}
+
+function hermesPrompt(title: string, body: string, rows: { label: string; description: string | null; selected: boolean }[], responder: Responder): ParsedPrompt | null {
+  if ((responder.endsWith("approval") && !body) || body.length > 12_000 || rows.length < 2 || rows.length > 5 || rows.filter((row) => row.selected).length !== 1) return null;
+  return finishPrompt("hermes", {
+    kind: "approval", title, question: title, body,
+    options: rows.map(({ label, description }) => ({ label, description })), multi_select: false, custom_option_index: null,
+  }, {
+    responder, menuLabels: rows.map((row) => row.label), selectedIndex: rows.findIndex((row) => row.selected),
+    checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
+  });
+}
+
 
 function parseClaudeApproval(screen: string): ParsedPrompt | null {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
@@ -1889,6 +2017,8 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // Hermes keeps its status line (and maybe the hint's wrapped tail) under the hint; an answered
   // question leaves the screen, so a hint among the last few lines is the live one
   if (prompt.responder === "hermes-question" || prompt.responder === "hermes-input") return shown.slice(-4).some((line) => HERMES_HINT_RE.test(line));
+  // Approval and confirmation readers validate the complete native panel and its tail.
+  if (prompt.responder.startsWith("hermes-")) return true;
   if (prompt.responder === "codex-menu") return ends(CODEX_CONTINUE_HINT_RE);
   if (prompt.responder === "codex-question") return ends(CODEX_ASK_HINT_RE);
   if (prompt.responder === "codex-async-question") return cleanLines.slice(-4).some((line) => CODEX_ASYNC_ASK_HINT_RE.test(line)) || ends(CODEX_ASYNC_ASK_HINT_RE);
@@ -2323,7 +2453,7 @@ function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null
         : agent === "pi"
           ? [parsePiModel(screen), parsePiDialog(screen), ...omo()]
         : agent === "hermes"
-          ? [parseHermesClarify(screen)]
+          ? [parseHermesPrompt(screen), parseHermesClarify(screen)]
         : agent === "omo" || agent === ""
           ? omo()
           : [];
@@ -2769,6 +2899,7 @@ function askingEnded(paneId: string): void {
  * question.
  */
 export function promptWaitEnded(paneId: string): void {
+  hermesAnswered.delete(paneId);
   if (!askings.get(paneId)?.queued) askingEnded(paneId);
 }
 
@@ -2780,6 +2911,10 @@ function contentId(prompt: InteractivePrompt | null): string | undefined {
 /** When each pane's omo form was last answered from the chat (see readPrompt). */
 const formsAnswered = new Map<string, number>();
 const FORM_SETTLE_MS = 3_000;
+
+/** A committed Hermes panel can linger through a delayed redraw. It is not another asking
+ * until the screen changes or the collector observes the agent back at work. */
+const hermesAnswered = new Map<string, string>();
 
 /** Each pane's rollout, resolved for its collapsed queue: a poll every 2s would otherwise redo it. */
 const queueRollouts = new Map<string, { path: string | null; at: number }>();
@@ -3057,6 +3192,7 @@ async function readPrompt(paneId: string, codexHome?: string): Promise<{ agent: 
   for (const known of answerTurns.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) answerTurns.delete(known);
   for (const known of heldCandidates.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) heldCandidates.delete(known);
   for (const known of chatSent.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) chatSent.delete(known);
+  for (const known of hermesAnswered.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) hermesAnswered.delete(known);
   const pane = panes.find((candidate) => candidate.pane_id === paneId);
   if (!pane) throw new HerdrError("pane_not_found", `pane ${paneId} not found`);
   const agent = pane.agent ?? "";
@@ -3075,9 +3211,8 @@ async function readPrompt(paneId: string, codexHome?: string): Promise<{ agent: 
   // herdr says the agent waits on the user and no reader knows the screen: the fallback card
   const screen = known.screen ?? await liveScreen(paneId);
   // Codex's collapsed question queue reads blocked while its main prompt takes a message; a
-  // model list of Claude Code's or Codex's that no reader could read is left to the terminal
-  // (claudeModelListWaits, codexModelListWaits)
-  if ((agent === "codex" && (codexQuestionsCollapsed(screen) || codexModelListWaits(screen))) || claudeModelListWaits(screen) || claudeModelListWaits(screen, CLAUDE_EFFORT_GUARD_RE)) {
+  // model list that no reader could read, and unsupported Hermes waits, stay in the terminal.
+  if (agent === "hermes" || (agent === "codex" && (codexQuestionsCollapsed(screen) || codexModelListWaits(screen))) || claudeModelListWaits(screen) || claudeModelListWaits(screen, CLAUDE_EFFORT_GUARD_RE)) {
     fallbackLogged.delete(paneId);
     return { agent, status, prompt: asked(paneId, null, turns), pane, panes };
   }
@@ -3126,6 +3261,10 @@ async function readKnownPrompt(
   // on the user, or the session's pending call is the form on screen
   const omoTrusted = (agent !== "claude" && agent !== "") || pane.agent_status === "blocked";
   const prompt = parseInteractivePrompt(agent, screen, omoAsks[0] ?? null, omoTrusted, omoAsks, agent === "claude" ? heldCandidate(paneId) : null, pane.agent_status === "working");
+  if (agent === "hermes" && hermesAnswered.has(paneId)) {
+    if (contentId(prompt) === hermesAnswered.get(paneId)) return { prompt: null, screen };
+    hermesAnswered.delete(paneId);
+  }
   if (prompt && await claudeHeldIsGrey(paneId, prompt)) return { prompt: null, screen };
   if (!prompt && agent === "gjc") {
     const fallback = parseFallbackPrompt(agent, screen);
@@ -3373,7 +3512,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         // Claude's unnumbered rows and pi's models are read with no number to aim at: looked at
         // again before the Enter even when it needs no move. So is Claude's model list, picked
         // with a letter: typed after the list has gone, it would stand in the agent's own prompt
-        let moved = responder === "claude-confirm" || responder === "pi-model" || responder === "omo-question" || responder === "claude-model" || responder === "claude-effort" || responder === "codex-model" || responder === "fallback-gjc-menu";
+        let moved = responder.startsWith("hermes-") || responder === "claude-confirm" || responder === "pi-model" || responder === "omo-question" || responder === "claude-model" || responder === "claude-effort" || responder === "codex-model" || responder === "fallback-gjc-menu";
         // Claude's and Codex's model lists: a window on a list, picked with a letter; Claude's effort
         // slider the same way, its levels side by side
         const list = responder === "claude-model" || responder === "claude-effort" || responder === "codex-model";
@@ -3407,7 +3546,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
          * so far leave it. False: the asking ended, nobody waits for the answer, or the menu did
          * not show so within SETTLE_MS.
          */
-        const onRow = async (): Promise<boolean> => {
+        const onRow = async (matches = aimed): Promise<boolean> => {
           const deadline = Date.now() + SETTLE_MS;
           for (;;) {
             // nobody waits for this answer any more: nothing that cannot be undone is started
@@ -3420,7 +3559,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
             const read = await Promise.race([reading, Bun.sleep(left).then(() => null)]);
             if (!read || Date.now() > deadline) return false;
             const shown = read.prompt ? parsedByPublicPrompt.get(read.prompt) ?? null : null;
-            if (asks() && aimed(shown, read.screen ?? "")) { looked(shown); return true; }
+            if (asks() && matches(shown, read.screen ?? "")) { looked(shown); return true; }
             await Bun.sleep(50);
           }
         };
@@ -3435,7 +3574,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           // keys to the agent's own prompt, where an arrow walks the prompt's history: each move
           // after the first goes only once the list shows the one before it
           // GJC's selector the same: dismissed under the answer, its composer would take the moves
-          if (move && walked && (list || responder === "fallback-gjc-menu") && !(await onRow())) return promptChanged();
+          if (move && walked && (list || responder.startsWith("hermes-") || responder === "fallback-gjc-menu") && !(await onRow())) return promptChanged();
           if (!move && !committed) {
             // An answer is only as good as the menu and the cursor it moves from, and both are
             // as old as the read above by the time its moves are done: the menu answered in the
@@ -3483,6 +3622,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         if (queueOpened && !answered) await closeOpenQuestion(body.pane_id).catch(() => undefined);
         // answered, or as good as: the same prompt on the screen after this is asked anew
         if (committed) askingEnded(body.pane_id);
+        if (committed && agent === "hermes") hermesAnswered.set(body.pane_id, contentId(target)!);
         // sent or dropped from its card: the same words in the box after this are a new message
         if (committed && parsedByPublicPrompt.get(target)?.responder === "claude-held") heldCandidates.delete(body.pane_id);
       }

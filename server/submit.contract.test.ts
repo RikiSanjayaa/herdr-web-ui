@@ -116,6 +116,7 @@ const paste = (text: string) => `\u001b[200~${text}\u001b[201~`;
 const hermesRule = "─".repeat(60);
 const hermesScreen = (input = "❯") => `${hermesRule}\n${input}\n${hermesRule}\n`;
 const hermesMenu = hermesScreen("⚠ ❯ type 1/2/3, or use ↑/↓ then Enter");
+const hermesTuiMenu = ["╔" + "═".repeat(98) + "╗", ...["⚠ Start a new session?", "This ends the current conversation and clears the transcript.", "", "▸ No, keep going", "  Yes, start a new session", "↑/↓ select · Enter confirm · Y/N quick · Esc cancel"].map((line) => `║ ${line.padEnd(96)} ║`), "╚" + "═".repeat(98) + "╝", "", "─ ~/app │ smoke-model │ idle ─"].join("\n");
 
 async function hermesRecorder(label: string, screen = hermesScreen()): Promise<Recorder> {
   // A real TUI repaints its chrome; do not leave the shell's echoed multiline
@@ -404,7 +405,7 @@ describe("WebSocket submit", () => {
   }, 30_000);
 
   it("refuses Hermes menus reported idle and unreadable/clipped inputs without typing", async () => {
-    for (const [label, screen, code] of [["menu", hermesMenu, "agent_blocked"], ["nested-rule", hermesScreen(`❯ native terminal draft\n${hermesRule}\n❯`), "hermes_input_draft"], ["nested-status", `─ ready │ smoke model ─ project\n❯ native terminal draft\n─ ready │ smoke model ─ project\n❯`, "hermes_input_draft"], ["unknown", "output without a readable input", "hermes_input_draft"], ["clipped", `native terminal draft\n${hermesRule}`, "hermes_input_draft"]]) {
+    for (const [label, screen, code] of [["menu", hermesMenu, "agent_blocked"], ["tui-menu", hermesTuiMenu, "agent_blocked"], ["nested-rule", hermesScreen(`❯ native terminal draft\n${hermesRule}\n❯`), "hermes_input_draft"], ["nested-status", `─ ready │ smoke model ─ project\n❯ native terminal draft\n─ ready │ smoke model ─ project\n❯`, "hermes_input_draft"], ["unknown", "output without a readable input", "hermes_input_draft"], ["clipped", `native terminal draft\n${hermesRule}`, "hermes_input_draft"]]) {
       const fixture = await hermesRecorder(`hermes-${label}`, screen);
       const socket = await Socket.connect();
       try {

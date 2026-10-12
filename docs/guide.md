@@ -152,7 +152,7 @@ Every agent herdr runs shows up with its live status, terminal and alerts. The c
 | **OpenCode** | Native session in OpenCode 2's own database, resolved through herdr: `~/.local/share/opencode/opencode.db` (`%USERPROFILE%\.local\share\opencode\opencode.db` on Windows), or where the server's `XDG_DATA_HOME` or `OPENCODE_DB` puts it | — use Terminal |
 | **Devin CLI** | Native SQLite session, showing the active branch when herdr or the live process explicitly identifies the session; otherwise terminal text | — use Terminal |
 | **Grok** | Linux native update log with exact process/session evidence, on the `grok-1.0.50-linux-x86_64` build only; other builds use Terminal. See [Grok setup and limits](grok-chat.md). | — use Terminal |
-| **Hermes** | Native SQLite session store | — use Terminal |
+| **Hermes** | Native SQLite session store | ✓ clarification questions, plus tool approvals and confirmations in the classic CLI and default TUI |
 | **Antigravity (agy)** | **Experimental; macOS untested.** Native ledger, selected by the running process’s held conversation lock. Linux native-tested; Windows uses terminal text. See [Agy behavior and limits](agy-chat.md). | — use Terminal |
 | **Anything else** | The terminal's text | — use Terminal |
 
@@ -161,6 +161,11 @@ shell mode, an unreadable input box or an active dialog keeps the message from b
 typed; the Chat draft stays available. Before submitting a pasted message, the bridge
 checks the live input again. A changed dialog or disconnected sender cancels Enter,
 and an uncertain delivery is never retried automatically.
+
+Hermes approval cards use the native arrow keys and Enter, and reject answers to an
+earlier prompt. Truncated command previews, unsupported dialogs and unrecognized
+custom input chrome stay in Terminal. Clear or send an existing terminal draft there
+before sending from Chat.
 
 Devin sessions are never selected by directory or recency alone. A plain `devin` shows the
 terminal text, since herdr does not report its session without its Devin integration; a session

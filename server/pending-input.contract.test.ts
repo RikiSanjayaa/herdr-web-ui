@@ -41,6 +41,7 @@ const codexSteering = (entry = "send this now") => `• Working (2s • esc to i
 const hermesRule = "─".repeat(60);
 const hermesScreen = (input = "❯") => `${hermesRule}\n${input}\n${hermesRule}\n`;
 const hermesMenu = hermesScreen("⚠ ❯ type 1/2/3, or use ↑/↓ then Enter");
+const hermesTuiMenu = ["╔" + "═".repeat(98) + "╗", ...["⚠ Start a new session?", "This ends the current conversation and clears the transcript.", "", "▸ No, keep going", "  Yes, start a new session", "↑/↓ select · Enter confirm · Y/N quick · Esc cancel"].map((line) => `║ ${line.padEnd(96)} ║`), "╚" + "═".repeat(98) + "╝", "", "─ ~/app │ smoke-model │ idle ─"].join("\n");
 
 class Socket {
   readonly seen: any[] = [];
@@ -269,6 +270,16 @@ describe("connection-owned pending input", () => {
     await f.showScreen(hermesScreen(`❯ [Pasted text #1: 6 lines → ${path}] extra terminal draft`));
     expect(await f.socket.action(11)).toMatchObject({ ok: false, code: "submit_changed" });
     expect(f.bytes()).toBe(`${paste(text)}\r${paste(text)}`);
+  }, 30_000);
+
+
+  it("refuses an idle-reported Hermes dialog before pending paste", async () => {
+    const f = await setup("hermes-menu", "hermes", hermesScreen());
+    const message = await f.queue(1, "ordinary chat");
+    await f.showScreen(hermesTuiMenu); await f.state("idle");
+    f.socket.send({ type: "pending-action", id: 10, pane_id: f.pane, pending_id: message.id, action: "steer" });
+    expect(await f.socket.action(10)).toMatchObject({ ok: false, code: "agent_blocked" });
+    expect(f.bytes()).toBe("");
   }, 30_000);
 
   it("withholds pending Hermes Enter when a dialog replaces the input after paste, without automatic retry", async () => {
