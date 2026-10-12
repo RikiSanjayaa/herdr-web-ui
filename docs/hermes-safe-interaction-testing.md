@@ -1,6 +1,6 @@
 # Manual test: Hermes safe interaction
 
-Test the local `feat/hermes-safe-interaction` branch before discussing or opening its follow-up PR. Nothing needs to be committed or pushed for these checks.
+Use these checks to verify Hermes Chat input safety, native prompt cards and Stop behavior in both the classic CLI and default TUI. Run them in a disposable workspace and a separate herdr session, not a live work session.
 
 ## Start a separate local test
 

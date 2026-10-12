@@ -34,7 +34,7 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   ([#698](https://github.com/devswha/herdr-web-ui/pull/698) by @pt-act)
 - Hermes Chat answers native tool approvals and confirmations in the classic CLI and default
   TUI. Sends preserve terminal drafts, recheck input before Enter, and stop on changed prompts
-  or disconnected senders. Unreadable input and truncated approval previews stay in Terminal.
+  or disconnected senders. Unreadable input and truncated approval previews stay in Terminal. ([#859](https://github.com/devswha/herdr-web-ui/pull/859) by @RikiSanjayaa)
 - **Shared settings and pins.** The browsers of one server, a PC's and a phone's, keep the same
   pinned agents and the same settings that do not depend on the device: theme and colors, language,
   the sidebar's rows, order, cards and pins, chat and usage-meter choices. A
@@ -101,10 +101,10 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
 ### Fixed
 - Hermes Chat Stop suppresses repeated clicks and composer Escape across a bridge's clients,
   shows Stopping while waiting, and keeps uncertain outcomes consumed without retrying or
-  force-exiting. Other agents and direct Terminal input are unchanged.
+  force-exiting. Other agents and direct Terminal input are unchanged. ([#859](https://github.com/devswha/herdr-web-ui/pull/859) by @RikiSanjayaa)
 - Hermes Chat cards recognize the installed TUI's approval footer and single clarification
   questions, and typed answers wait for the native editor before Enter. Classic CLI
-  slash-command autocomplete no longer blocks a Chat `/clear` send.
+  slash-command autocomplete no longer blocks a Chat `/clear` send. ([#859](https://github.com/devswha/herdr-web-ui/pull/859) by @RikiSanjayaa)
 
 ## [0.4.8] - 2026-10-12
 
