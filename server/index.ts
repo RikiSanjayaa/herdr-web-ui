@@ -899,6 +899,7 @@ export function createServer(
     await Bun.sleep(RESTORED_CLEAR_SETTLE_MS);
     if (claudeInputDraft(...await claudeBoxReads(paneId))) throw new HerdrError("input_draft", CLAUDE_INPUT_DRAFT_MESSAGE);
   }
+  /** Verifies Hermes terminal input is verified clean and ready before sending or committing. */
   async function guardHermesInput(paneId: string, expected?: string): Promise<void> {
     const initial = await paneRead({ paneId, source: "detection", format: "text" });
     if (initial.truncated) throw new HerdrError("hermes_input_draft", HERMES_INPUT_DRAFT_MESSAGE);

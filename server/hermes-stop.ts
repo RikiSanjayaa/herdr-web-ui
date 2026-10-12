@@ -8,7 +8,9 @@ type Identity = { terminal: string; session: string | null; agent: string | null
 type Turn = { id: string; ready: boolean; claimedAt: number | null; attempted: boolean; unconfirmed: boolean; stopped: boolean };
 type ObservedPane = { identity: Identity | null; agent: string | null; status: AgentStatus; turn: Turn | null; revision: number; ended: boolean; interruptAt: number | null; consumedTerminal: string | null };
 
+/** Represents a controlled rejection for Hermes Stop operations. */
 export class HermesStopError extends Error {
+  /** Creates a HermesStopError carrying a specific error code. */
   constructor(public readonly code: "hermes_stop_changed" | "hermes_stop_unavailable", message: string) { super(message); }
 }
 
@@ -36,11 +38,13 @@ export class HermesStops {
   private readonly startedAt: number;
   private closed = false;
 
+  /** Initializes Hermes Stop tracking with required pane inspection and RPC helpers. */
   constructor(private readonly deps: Dependencies) {
     this.now = deps.now ?? Date.now;
     this.startedAt = this.now();
   }
 
+  /** Retrieves or initializes the observed tracking state for a pane. */
   private pane(paneId: string): ObservedPane {
     let pane = this.panes.get(paneId);
     if (!pane) {
@@ -50,6 +54,7 @@ export class HermesStops {
     return pane;
   }
 
+  /** Advances turn lifecycle state based on newly observed agent status. */
   private advance(pane: ObservedPane, status: AgentStatus): void {
     pane.status = status;
     if (pane.agent !== "hermes" || !pane.identity || pane.ended) return;
@@ -90,6 +95,7 @@ export class HermesStops {
     return snapshot;
   }
 
+  /** Applies a confirmed pane snapshot to reconcile identity and lifecycle state. */
   private observe(snapshot: HerdrPane): void {
     const pane = this.pane(snapshot.pane_id);
     const identity = identityOf(snapshot);
@@ -103,6 +109,7 @@ export class HermesStops {
     this.advance(pane, snapshot.agent_status);
   }
 
+  /** Marks a pane as ended, releasing consumed claims and settling active turns. */
   ended(paneId: string): void {
     const pane = this.pane(paneId);
     pane.revision++;
@@ -115,10 +122,12 @@ export class HermesStops {
     pane.status = "done";
   }
 
+  /** Checks whether the required cooldown duration has passed since the last interrupt. */
   private cooled(pane: ObservedPane): boolean {
     return this.now() - Math.max(this.startedAt, pane.interruptAt ?? this.startedAt) >= COOLDOWN_MS;
   }
 
+  /** Produces the current external HermesStopResponse representation for a pane. */
   private response(paneId: string): HermesStopResponse {
     const pane = this.pane(paneId);
     const turn = pane.turn;
@@ -129,6 +138,7 @@ export class HermesStops {
     return { pane_id: paneId, turn_id: available ? turn!.id : null, state: available ? "available" : "unavailable" };
   }
 
+  /** Fetches a fresh pane snapshot from dependencies without rewinding newer collector events. */
   private async fresh(paneId: string): Promise<HerdrPane | null> {
     const pane = this.pane(paneId);
     const revision = pane.revision;
@@ -141,11 +151,13 @@ export class HermesStops {
     return snapshot;
   }
 
+  /** Returns the current Stop state and turn ID for a pane after verifying freshness. */
   async get(paneId: string): Promise<HermesStopResponse> {
     await this.fresh(paneId);
     return this.response(paneId);
   }
 
+  /** Requests a guarded Stop interrupt for the specified active turn. */
   async request(paneId: string, turnId: string, signal: AbortSignal): Promise<HermesStopResponse> {
     const snapshot = await this.fresh(paneId);
     const pane = this.pane(paneId);
@@ -193,5 +205,6 @@ export class HermesStops {
     return this.response(paneId);
   }
 
+  /** Marks the manager as closed, preventing subsequent Stop operations. */
   close(): void { this.closed = true; }
 }

@@ -1199,6 +1199,7 @@ const HERMES_TUI_CONFIRM_HINT = "↑/↓ select · Enter confirm · Y/N quick ·
 const HERMES_CONFIRM_PANEL_HINT = "Type 1/2/3 or use ↑/↓ then Enter. ESC/Ctrl+C cancels.";
 const HERMES_TRUNCATED_RE = /…|\(command truncated|\(description truncated|\(detail truncated/;
 
+/** Normalizes a Hermes border-panel line by stripping ANSI escapes and boundary box characters. */
 function hermesLine(line: string): string {
   return line.replace(ANSI_RE, "").trim().replace(/^[│║]\s?/, "").replace(/\s?[│║]$/, "").trim();
 }
@@ -1226,6 +1227,7 @@ function hermesTail(lines: string[], end: number, classic: boolean, confirmation
   return rest.length <= 6 && composer;
 }
 
+/** Recognizes and parses classic CLI and default TUI Hermes approval or confirmation panels. */
 function parseHermesPrompt(screen: string): ParsedPrompt | null {
   const raw = screen.replace(ANSI_RE, "").split(/\r?\n/);
   const start = findLastIndex(raw, (line) => /^\s*[╭╔][─═]+[╮╗]\s*$/.test(line));
@@ -1303,6 +1305,7 @@ function parseHermesPrompt(screen: string): ParsedPrompt | null {
   return hermesPrompt(title, body, rows, classic ? approval ? "hermes-classic-approval" : "hermes-classic-confirm" : "hermes-tui-approval");
 }
 
+/** Finalizes an approval prompt model from parsed Hermes dialog rows and options. */
 function hermesPrompt(title: string, body: string, rows: { label: string; description: string | null; selected: boolean }[], responder: Responder): ParsedPrompt | null {
   if ((responder.endsWith("approval") && !body) || body.length > 12_000 || rows.length < 2 || rows.length > 5 || rows.filter((row) => row.selected).length !== 1) return null;
   return finishPrompt("hermes", {
@@ -2410,6 +2413,7 @@ function parseHermesSingleClarify(lines: string[]): ParsedPrompt | null {
   return hermesClarifyQuestion(question, null, member);
 }
 
+/** Parses Hermes clarification question dialogs from Ink screens, falling back to single questions. */
 function parseHermesClarify(screen: string): ParsedPrompt | null {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map((line) => line.trimEnd());
   const hintIndex = findLastIndex(lines, (line) => HERMES_HINT_RE.test(line.trim()));
@@ -2432,6 +2436,7 @@ function parseHermesClarify(screen: string): ParsedPrompt | null {
   return hermesClarifyQuestion(question, body, member);
 }
 
+/** Assembles an interactive clarify question prompt from extracted Hermes dialog content. */
 function hermesClarifyQuestion(question: string, body: string | null, member: string[]): ParsedPrompt | null {
   if (!question) return null;
   // text already on the `>` line (typed in the terminal, or a typed answer Tab brought back)

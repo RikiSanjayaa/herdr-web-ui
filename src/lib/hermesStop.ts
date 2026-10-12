@@ -15,12 +15,14 @@ export class HermesStopGuard {
   private readonly consumedTurns = new Set<string>();
   private deadline: number | null = null;
 
+  /** Creates a HermesStopGuard tracking turn claims and status transitions for a pane. */
   constructor(private readonly paneId: string) {}
 
   get canStop(): boolean {
     return this.fresh && this.state === "available" && this.turnId !== null && !this.consumedTurns.has(this.turnId);
   }
 
+  /** Incorporates a server Stop response and transitions local state accordingly. */
   observe(response: HermesStopResponse, now: number): void {
     if (!response || response.pane_id !== this.paneId
       || (response.turn_id !== null && typeof response.turn_id !== "string")
@@ -69,6 +71,7 @@ export class HermesStopGuard {
     return this.turnId;
   }
 
+  /** Checks whether the active stopping deadline has elapsed without confirmation. */
   expire(now: number): void {
     if (this.state === "stopping" && this.deadline !== null && now >= this.deadline) {
       this.state = "unconfirmed";
@@ -76,17 +79,20 @@ export class HermesStopGuard {
     }
   }
 
+  /** Marks an in-flight turn claim as unconfirmed when network delivery fails or times out. */
   deliveryUnknown(turnId: string): void {
     if (this.attemptedTurn !== turnId || this.state === "stopped") return;
     this.state = "unconfirmed";
     this.deadline = null;
   }
 
+  /** Records a failed server read, marking the bridge as unsupported if the route is absent. */
   readFailed(unsupported = false): void {
     this.fresh = false;
     if (this.attemptedTurn === null) this.state = unsupported ? "unsupported" : "unavailable";
   }
 
+  /** Suspends polling and resets transient freshness on tab blur or connection drop. */
   suspend(): void {
     this.fresh = false;
     if (this.state === "stopping" && this.attemptedTurn !== null) this.deliveryUnknown(this.attemptedTurn);

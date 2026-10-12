@@ -13,6 +13,7 @@ const statusRule = (line: string): boolean => /^─+\s+\S/.test(line.trim());
 const prompt = /^(?:[\w.-]+ )?(?:(?:❯|>)|⚕(?:\s+(?:❯|>))?)\s?/u;
 const modal = /^(?:⚠|🔐|🔑|✎|\?|●|◉|🎤)(?:\s|$)/u;
 
+/** Parses native composer lines from terminal screen text, returning null if no valid input area is found. */
 function inputRows(screen: string, expected?: string): string[] | null {
   const rows = screen.split(/\r?\n/).map((row) => row.trimEnd());
   while (rows.length && !plain(rows.at(-1)!).trim()) rows.pop();
@@ -73,6 +74,7 @@ export function hermesSameInput(before: string, after: string): boolean {
   return first !== null && second !== null && first.map((row) => plain(row).trimEnd()).join("\n") === second.map((row) => plain(row).trimEnd()).join("\n");
 }
 
+/** Confirms that visible viewport ANSI rows match detection text and the terminal is scrolled to the bottom. */
 export function hermesViewportShowsLive(scrollBefore: { offset_from_bottom: number } | null, scrollAfter: { offset_from_bottom: number } | null,
   colors: string, before: string, live: string): boolean {
   if (!hermesSameInput(before, live) || !hermesSameInput(colors, live)) return false;
@@ -84,6 +86,7 @@ export function hermesViewportShowsLive(scrollBefore: { offset_from_bottom: numb
 }
 
 
+/** Checks whether rendered terminal lines represent the expected paste content across soft wraps. */
 function renderedPasteMatches(rows: string[], expected: string): boolean {
   let offset = 0;
   const target = expected.trim();
@@ -99,6 +102,7 @@ function renderedPasteMatches(rows: string[], expected: string): boolean {
 }
 
 const lineCountFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1, notation: "compact" });
+/** Computes the native Ink TUI token label for folded multiline text pastes. */
 function tuiPasteLabel(expected: string): string {
   // Native text.ts edgePreview/pasteTokenLabel: immutable token text is held out
   // of band. Reproduce the displayed identity, not a generic "N lines" token.

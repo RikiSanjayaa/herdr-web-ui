@@ -202,6 +202,7 @@ export async function fetchHermesStop(paneId: string, machineId = "local", signa
   return await response.json() as HermesStopResponse;
 }
 
+/** Sends a POST request to interrupt the active Hermes turn on the bridge. */
 export async function requestHermesStop(request: HermesStopRequest, machineId = "local", signal?: AbortSignal): Promise<HermesStopResponse> {
   const url = machinePath(machineId, "pane/hermes-stop");
   const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request), signal });
