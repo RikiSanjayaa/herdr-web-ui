@@ -43,6 +43,7 @@ describe("Hermes discovery", () => {
     const commands = hermesCommands(null, context());
     expect(commands.find(command => command.name === "help")?.source).toBe("builtin");
     expect(commands.find(command => command.name === "status")?.source).toBe("builtin");
+    expect(commands.find(command => command.name === "reload-skills")?.source).toBe("builtin");
   });
 
   it("requires trust and current native scan proof before project precedence applies", () => {

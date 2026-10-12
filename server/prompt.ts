@@ -121,7 +121,7 @@ type Responder =
   | "pi-model"
   | "hermes-question"
   | "hermes-input"
-  | "hermes-status"
+  | "hermes-pager"
   | "hermes-output"
   | "fallback-menu"
   | "fallback-gjc-menu"
@@ -1891,7 +1891,7 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // Hermes keeps its status line (and maybe the hint's wrapped tail) under the hint; an answered
   // question leaves the screen, so a hint among the last few lines is the live one
   if (prompt.responder === "hermes-question" || prompt.responder === "hermes-input") return shown.slice(-4).some((line) => HERMES_HINT_RE.test(line));
-  if (prompt.responder === "hermes-status") return true; // its complete, bottom-most native overlay is checked by the parser
+  if (prompt.responder === "hermes-pager") return true; // its complete, bottom-most native overlay is checked by the parser
   if (prompt.responder === "hermes-output") return true; // read-only output admitted only after this pane's explicit command
   if (prompt.responder === "codex-menu") return ends(CODEX_CONTINUE_HINT_RE);
   if (prompt.responder === "codex-question") return ends(CODEX_ASK_HINT_RE);
@@ -2236,8 +2236,8 @@ const HERMES_OTHER = "Other (type your answer)";
 
 const HERMES_PAGER_HINT_RE = /^(?:↑↓\/jkline·Enter\/Space\/PgDnpage·b\/PgUpback·g\/Gtop\/bottom·Esc\/qclose\(\d+\/\d+\)|end·↑↓\/jk·b\/PgUpback·gtop·Esc\/qclose\(\d+lines\))$/;
 
-/** Ink's status pager is read-only; each button sends one explicit native pager key. */
-function parseHermesStatus(screen: string): ParsedPrompt | null {
+/** Ink's informational pagers are read-only; each button sends one explicit native pager key. */
+function parseHermesPager(screen: string): ParsedPrompt | null {
   const raw = screen.replace(ANSI_RE, "").split(/\r?\n/);
   const top = findLastIndex(raw, line => /^\s*╔═+╗/.test(line));
   if (top < 0) return null;
@@ -2247,16 +2247,16 @@ function parseHermesStatus(screen: string): ParsedPrompt | null {
   if (!rows.every(line => /^\s*║.*║/.test(line))) return null;
   const lines = rows.map(line => line.slice(line.indexOf("║") + 1, line.lastIndexOf("║")).trim());
   const title = lines.findIndex(Boolean);
-  if (title < 0 || lines[title] !== "Status") return null;
+  if (title < 0 || !["Status", "Reload Skills"].includes(lines[title]!)) return null;
   const hint = lines.findIndex((line, index) => index > title && /^(?:↑|end)/.test(line) && [1, 2, 3, 4, 5, 6, 7, 8].some(span => HERMES_PAGER_HINT_RE.test(lines.slice(index, index + span).join("").replace(/\s+/g, ""))));
   if (hint < 0) return null;
   const body = lines.slice(title + 1, hint).join("\n").trim();
   const end = lines[hint]!.startsWith("end ·");
   const options = end ? ["Previous page", "Close"] : ["Previous page", "Next page", "Close"];
   return finishPrompt("hermes", {
-    kind: "menu", title: "Status", question: "Native terminal output", body,
+    kind: "menu", title: lines[title]!, question: "Native terminal output", body,
     options: options.map(label => ({ label, description: null })), multi_select: false, custom_option_index: null,
-  }, { responder: "hermes-status", menuLabels: options, selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
+  }, { responder: "hermes-pager", menuLabels: options, selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
     optionSteps: (end ? ["pageup", KEY.escape] : ["pageup", "pagedown", KEY.escape]).map(key => keySteps([key])) });
 }
 
@@ -2283,8 +2283,8 @@ function parseHermesHelp(screen: string, sent: string | null): ParsedPrompt | nu
 
 /** Classic Hermes prints command results above its status bar and bordered input box. */
 function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPrompt | null {
-  const command = sent?.trim();
-  if (command !== "/help" && command !== "/status") return null;
+  const command = sent?.trim().replace(/^\/reload_skills$/, "/reload-skills");
+  if (command !== "/help" && command !== "/status" && command !== "/reload-skills") return null;
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map(cleanLine);
   const input = findLastIndex(lines, line => /^(?:[\w.-]+\s+)?❯(?:\s.*)?$/.test(line));
   if (input < 0) return null;
@@ -2297,6 +2297,11 @@ function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPr
     end = findLastIndex(output, line => /^Agent Running: (?:Yes|No)$/.test(line));
     if (start < 0 || end <= start || !output.slice(start, end).some(line => /^Session ID: /.test(line))
       || !output.slice(start, end).some(line => /^Model: /.test(line)) || !output.slice(start, end).some(line => /^Tokens: /.test(line))) return null;
+  } else if (command === "/reload-skills") {
+    end = findLastIndex(output, line => /^(?:📚\s*)?\d+ skill\(s\) available$|^❌ Skills reload failed: .+/.test(line));
+    const echo = findLastIndex(output, line => /^(?:⚙️?\s*)?\/reload[-_]skills$/.test(line));
+    start = output.findIndex((line, index) => index > echo && /^(?:🔄 Reloading skills\.\.\.|No new skills detected\.|➕ Added Skills:|➖ Removed Skills:|❌ Skills reload failed:)/.test(line));
+    if (end < 0 || start < 0 || start > end) return null;
   } else {
     const tip = findLastIndex(output, line => /^Tip: \/help skills lists skill commands/.test(line));
     end = findLastIndex(output, line => /^(?:Paste image: Alt\+V \(or \/paste\)|Attach image: \/image )/.test(line));
@@ -2305,7 +2310,9 @@ function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPr
   }
   if (output.slice(end + 1).some(Boolean)) return null;
   return finishPrompt("hermes", {
-    kind: "menu", title: command === "/help" ? "Help" : "Status", question: "Visible terminal output; use Terminal to scroll the full output.",
+    kind: "menu", title: command === "/help" ? "Help" : command === "/status" ? "Status"
+      : /^❌ Skills reload failed:/.test(output[end]!) ? "Reload Skills failed" : "Reload Skills",
+    question: "Visible terminal output; use Terminal to scroll the full output.",
     body: output.slice(start, end + 1).join("\n").trim(),
     options: [{ label: "Dismiss", description: null }], multi_select: false, custom_option_index: null,
   }, { responder: "hermes-output", menuLabels: ["Dismiss"], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null, optionSteps: [[]] });
@@ -2404,7 +2411,7 @@ function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null
         : agent === "pi"
           ? [parsePiModel(screen), parsePiDialog(screen), ...omo()]
         : agent === "hermes"
-          ? [parseHermesClarify(screen), parseHermesStatus(screen), working ? null : parseHermesHelp(screen, sent), working ? null : parseHermesClassicOutput(screen, sent)]
+          ? [parseHermesClarify(screen), parseHermesPager(screen), working ? null : parseHermesHelp(screen, sent), working ? null : parseHermesClassicOutput(screen, sent)]
         : agent === "omo" || agent === ""
           ? omo()
           : [];

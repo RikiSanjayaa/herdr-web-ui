@@ -84,6 +84,29 @@ describe("Hermes native informational output", () => {
     expect(parseInteractivePrompt("hermes", screen, null, true, [], "/help")?.body).toBe(hermesClassicHelp);
     expect(parseInteractivePrompt("hermes", hermesClassicOutput(`${hermesClassicHelp}\nNew assistant answer`), null, true, [], "/help")).toBeNull();
   });
+  test("recognizes classic reload completion, additions, removals and no-change results", () => {
+    for (const body of ["No new skills detected.\n📚 54 skill(s) available", "➕ Added Skills:\n- new-skill: New description\n➖ Removed Skills:\n- old-skill\n📚 54 skill(s) available"]) {
+      const prompt = parseInteractivePrompt("hermes", hermesClassicOutput(`⚙️ /reload-skills\n${body}`), null, true, [], "/reload-skills")!;
+      expect(prompt.title).toBe("Reload Skills");
+      expect(prompt.body).toBe(body);
+      expect(answerKeys(prompt, { option_index: 0 })).toEqual([]);
+    }
+  });
+  test("does not mistake a prior completion or a failed reload for success", () => {
+    const loading = "No new skills detected.\n📚 54 skill(s) available\n⚙️ /reload-skills\n🔄 Reloading skills...";
+    expect(parseInteractivePrompt("hermes", hermesClassicOutput(loading), null, true, [], "/reload-skills")).toBeNull();
+    const prompt = parseInteractivePrompt("hermes", hermesClassicOutput("⚙️ /reload_skills\n❌ Skills reload failed: unreadable directory"), null, true, [], "/reload_skills")!;
+    expect(prompt.title).toBe("Reload Skills failed");
+    expect(prompt.body).toBe("❌ Skills reload failed: unreadable directory");
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([]);
+  });
+  test("uses native pager navigation for Ink reload results", () => {
+    const screen = hermesStatusOutput("Reloading skills...\nAdded skills:\n- new-skill\n55 skill(s) available", true).replace("Status", "Reload Skills");
+    const prompt = parseInteractivePrompt("hermes", screen)!;
+    expect(prompt.title).toBe("Reload Skills");
+    expect(prompt.body).toContain("55 skill(s) available");
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
+  });
 });
 
 describe("interactive prompt parsing", () => {
@@ -3066,6 +3089,19 @@ describe("an answer and the menu it was made for", () => {
       const first = (await card())!;
       expect(first.body).toBe(hermesClassicStatus);
       expect((await answer(first.id, { option_index: 0 })).status).toBe(200);
+      expect(pane.sent).toEqual([]);
+      expect(await card()).toBeNull();
+    });
+  });
+
+  test("dismisses a reload result without sending keys or accepting a stale replacement", async () => {
+    await withPane("hermes", "idle", hermesClassicOutput("No new skills detected.\n📚 54 skill(s) available"), async pane => {
+      noteSubmitted("p_1", "/reload-skills");
+      const first = (await card())!;
+      pane.screen = hermesClassicOutput("➕ Added Skills:\n- new-skill\n📚 55 skill(s) available");
+      expect((await answer(first.id, { option_index: 0 })).status).toBe(409);
+      const next = (await card())!;
+      expect((await answer(next.id, { option_index: 0 })).status).toBe(200);
       expect(pane.sent).toEqual([]);
       expect(await card()).toBeNull();
     });

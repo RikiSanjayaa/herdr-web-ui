@@ -310,6 +310,7 @@ export function hermesCommands(cwd?: string | null, context?: HermesCommandConte
     ...(context ? [
       { name: "help", description: "Show native help (visible terminal portion)", source: "builtin" as const },
       { name: "status", description: "Show native session status (terminal-backed card)", source: "builtin" as const },
+      { name: "reload-skills", description: "Reload native skills and refresh Chat suggestions", source: "builtin" as const },
     ] : []),
     ...(context ? discoverHermesSkills(cwd, context) : []),
   ];

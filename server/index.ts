@@ -679,8 +679,8 @@ export function createServer(
           if (clearDraft !== undefined && !claudeInputEmpty(...reads)) throw new InputDraftError(null);
         }
         try {
-          // Ink's /help and /status completion must be closed before the committing Enter.
-          const submitted = pane?.agent === "hermes" && /^\/(?:help|status)\s*$/.test(text) ? `${text.trim()} ` : closeMention(text);
+          // Close informational command completion before the committing Enter.
+          const submitted = pane?.agent === "hermes" && /^\/(?:help|status|reload[-_]skills)\s*$/.test(text) ? `${text.trim()} ` : closeMention(text);
           await agentPrompt(paneId, submitted);
           noteSubmitted(paneId, text);
           return;

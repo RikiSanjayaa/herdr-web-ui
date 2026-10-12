@@ -66,6 +66,8 @@ export interface ComposerProps {
   backgroundWait?: boolean;
   metadata?: ConversationMetadata | null;
   cwd?: string | null;
+  /** A confirmed native reload result is visible; refetch this pane's command inventory. */
+  skillsReloaded?: boolean;
   /** replaces the placeholder: how a message answers the agent's waiting prompt */
   answerHint?: string | null;
   /** what the agent suggests typing next (Claude's grey input text): the placeholder, taken with Tab */
@@ -110,15 +112,7 @@ export const SOURCE_LABEL: Record<SlashCommand["source"], string> = {
 type CommandCacheEntry = { loadedAt: number; commands: SlashCommand[]; agent?: string | null; cwd?: string | null };
 const commandCache = new Map<string, CommandCacheEntry>();
 
-export function forgetCommandCache(paneId?: string): void {
-  if (paneId) {
-    for (const key of commandCache.keys()) {
-      if (key.endsWith(`:${paneId}`) || key === paneId) commandCache.delete(key);
-    }
-  } else {
-    commandCache.clear();
-  }
-}
+const commandRequests = new Map<string, object>();
 let attachmentSequence = 0;
 
 type Attachment = {
@@ -172,8 +166,10 @@ async function cachedPaneCommands(
   fetchCommands: (pane: string) => Promise<SlashCommand[]>,
   agent?: string | null,
   cwd?: string | null,
+  refresh = false,
 ): Promise<SlashCommand[]> {
   const key = paneStorageId(machineId, paneId);
+  if (refresh) commandCache.delete(key);
   const cached = commandCache.get(key);
   if (
     cached &&
@@ -183,9 +179,16 @@ async function cachedPaneCommands(
   ) {
     return cached.commands;
   }
-  const commands = await fetchCommands(paneId);
-  commandCache.set(key, { loadedAt: Date.now(), commands, agent: agent ?? null, cwd: cwd ?? null });
-  return commands;
+  const request = {};
+  commandRequests.set(key, request);
+  try {
+    const commands = await fetchCommands(paneId);
+    // A pre-reload read must not replace the inventory fetched after reload completed.
+    if (commandRequests.get(key) === request) commandCache.set(key, { loadedAt: Date.now(), commands, agent: agent ?? null, cwd: cwd ?? null });
+    return commands;
+  } finally {
+    if (commandRequests.get(key) === request) commandRequests.delete(key);
+  }
 }
 
 /**
@@ -255,6 +258,7 @@ export function Composer({
   backgroundWait = false,
   metadata,
   cwd = null,
+  skillsReloaded = false,
   answerHint = null,
   suggestion = null,
   restored = null,
@@ -363,7 +367,7 @@ export function Composer({
 
   useEffect(() => {
     let live = true;
-    void cachedPaneCommands(paneId, machineId, fetchPaneCommands, agent, cwd)
+    void cachedPaneCommands(paneId, machineId, fetchPaneCommands, agent, cwd, skillsReloaded)
       .then((next) => {
         if (live) setCommands(next);
       })
@@ -373,7 +377,7 @@ export function Composer({
     return () => {
       live = false;
     };
-  }, [paneId, machineId, agent, cwd]);
+  }, [paneId, machineId, agent, cwd, skillsReloaded]);
 
   useEffect(() => {
     const request = ++fileRequest.current;

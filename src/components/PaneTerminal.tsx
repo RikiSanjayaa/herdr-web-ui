@@ -2463,6 +2463,8 @@ export function PaneTerminal({
           backgroundWait={backgroundWait}
           metadata={chatMetadata?.pane === paneId ? chatMetadata.value : null}
           cwd={cwd}
+          // Failed reloads have a different title; paging a successful result keeps this true.
+          skillsReloaded={chatPrompt?.pane === paneId && chatPrompt.value.agent === "hermes" && chatPrompt.value.title === "Reload Skills"}
           connected={connected && !held}
           answerHint={answering === null ? null
             : pendingAnswer?.promptId === answering.id ? t("Confirm your answer in the card above, or type another…") : answerHint(answering)}
