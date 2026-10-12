@@ -41,6 +41,18 @@ describe("Hermes terminal input evidence", () => {
     expect(hermesInputState(classic("❯ next plus terminal typing"), null, "next")).toBe("draft");
   });
 
+  it("confirms its own complete slash command despite native classic autocomplete", () => {
+    const completion = " /clear  Clear screen and start a new session\n";
+    const screen = classic("❯ /clear") + completion;
+    expect(hermesInputState(screen, null, "/clear")).toBe("empty");
+    expect(hermesInputState(screen)).not.toBe("empty");
+    expect(hermesInputState(screen, null, "/reset")).not.toBe("empty");
+    expect(hermesInputState(classic("❯ /clear terminal draft") + completion, null, "/clear")).not.toBe("empty");
+    expect(hermesInputState(screen + "❯ next message\n", null, "/clear")).not.toBe("empty");
+    expect(hermesInputState(classic("❯ /clear") + " /reset  Start a new session\n", null, "/clear")).not.toBe("empty");
+    expect(hermesInputState(classic(`❯ terminal draft\n${rule}\n❯ /clear`) + completion, null, "/clear")).not.toBe("empty");
+  });
+
   it("does not mistake screenshot-like multiline draft rows for a new empty composer", () => {
     const status = "─ ready │ smoke model │ voice off ─ project";
     for (const screen of [

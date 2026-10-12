@@ -41,7 +41,11 @@ function inputRows(screen: string, expected?: string): string[] | null {
   // Classic has solid rules on both sides. Its compact chrome hides the bottom
   // rule. The default Ink TUI has a single labeled status rule above OR below.
   if (rule < last) {
-    return content(rule + 1);
+    // Classic puts autocomplete below its bottom rule. Only this send's exact,
+    // complete command may ignore that sole matching suggestion during Enter's recheck.
+    const completion = expected !== undefined && /^\/[\w:.-]+$/.test(expected) && solidRule(lines[rule]!)
+      && last === rule + 1 && lines[last]!.trim().match(/^(\/\S+)\s{2,}\S.*$/)?.[1] === expected;
+    if (!completion) return content(rule + 1);
   }
   let top = rule - 1;
   while (top >= 0 && !solidRule(lines[top]!) && !statusRule(lines[top]!)) top--;

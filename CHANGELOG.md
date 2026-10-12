@@ -100,7 +100,8 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
 
 ### Fixed
 - Hermes Chat cards recognize the installed TUI's approval footer and single clarification
-  questions, and typed answers wait for the native editor before Enter.
+  questions, and typed answers wait for the native editor before Enter. Classic CLI
+  slash-command autocomplete no longer blocks a Chat `/clear` send.
 
 ## [0.4.8] - 2026-10-12
 

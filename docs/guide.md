@@ -166,6 +166,7 @@ Hermes approval cards use the native arrow keys and Enter, and reject answers to
 earlier prompt. Truncated command previews, unsupported dialogs and unrecognized
 custom input chrome stay in Terminal. Clear or send an existing terminal draft there
 before sending from Chat.
+Type `/clear` in Chat to open its native confirmation card; supported confirmations do not require a Terminal switch. Hermes command autocomplete is not provided in Chat yet, so type the command in full.
 
 Devin sessions are never selected by directory or recency alone. A plain `devin` shows the
 terminal text, since herdr does not report its session without its Devin integration; a session
