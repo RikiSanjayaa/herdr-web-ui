@@ -13,7 +13,7 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   Ink transcripts can resolve a unique process-owned native runtime session.
   Recognized single-skill transcript messages show the user request and a skill chip rather
   than the expanded instructions; native storage and model input stay unchanged.
-  Resolved panes also offer `/help`, `/status` and `/reload-skills` as terminal-backed cards:
+  Resolved panes also offer `/help`, `/status`, `/reload-skills` and `/version` as terminal-backed cards:
   visible output with a key-free dismiss action, and explicit navigation and close for Ink's
   informational pagers. Successful skill reloads refresh that pane's Chat suggestions immediately.
   ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)

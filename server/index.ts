@@ -680,7 +680,7 @@ export function createServer(
         }
         try {
           // Close informational command completion before the committing Enter.
-          const submitted = pane?.agent === "hermes" && /^\/(?:help|status|reload[-_]skills)\s*$/.test(text) ? `${text.trim()} ` : closeMention(text);
+          const submitted = pane?.agent === "hermes" && /^\/(?:help|status|reload[-_]skills|version|v)\s*$/.test(text) ? `${text.trim()} ` : closeMention(text);
           await agentPrompt(paneId, submitted);
           noteSubmitted(paneId, text);
           return;

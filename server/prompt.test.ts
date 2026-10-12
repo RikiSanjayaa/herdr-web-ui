@@ -107,6 +107,26 @@ describe("Hermes native informational output", () => {
     expect(prompt.body).toContain("55 skill(s) available");
     expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
   });
+  test("extracts classic version diagnostics despite an interleaved native command echo", () => {
+    const body = "Hermes Agent v0.21.0 (2026.8.31) · upstream abc12345 · local def67890 (+3 carried commits)\nInstall directory: /tmp/hermes-install\n\n⚙️ /version\nInstall method: git\nPython: 3.11.15\nOpenAI SDK: 2.24.0\nUp to date";
+    const screen = hermesClassicOutput(`Previous conversation\n${body}`);
+    const prompt = parseInteractivePrompt("hermes", screen, null, true, [], "/version")!;
+    expect(prompt.title).toBe("Version");
+    expect(prompt.body).toBe(body.replace("⚙️ /version\n", ""));
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([]);
+    expect(parseInteractivePrompt("hermes", screen)).toBeNull();
+    expect(parseInteractivePrompt("hermes", screen, null, true, [], "/version", true)).toBeNull();
+    expect(parseInteractivePrompt("hermes", hermesClassicOutput(body.replace("OpenAI SDK: 2.24.0\n", "")), null, true, [], "/version")).toBeNull();
+    expect(parseInteractivePrompt("hermes", hermesClassicOutput(`${body}\nNew assistant response`), null, true, [], "/version")).toBeNull();
+    expect(parseInteractivePrompt("hermes", screen, null, true, [], "/v")?.body).toBe(prompt.body);
+  });
+  test("shows the native Ink version pager and its explicit close key", () => {
+    const body = "Hermes Agent v0.21.0 (2026.8.31)\nInstall directory: /tmp/hermes-install\nPython: 3.11.15\nOpenAI SDK: Not installed";
+    const prompt = parseInteractivePrompt("hermes", hermesStatusOutput(body, true).replace("Status", "Version"))!;
+    expect(prompt.title).toBe("Version");
+    expect(prompt.body).toBe(body);
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
+  });
 });
 
 describe("interactive prompt parsing", () => {

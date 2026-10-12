@@ -2247,7 +2247,7 @@ function parseHermesPager(screen: string): ParsedPrompt | null {
   if (!rows.every(line => /^\s*║.*║/.test(line))) return null;
   const lines = rows.map(line => line.slice(line.indexOf("║") + 1, line.lastIndexOf("║")).trim());
   const title = lines.findIndex(Boolean);
-  if (title < 0 || !["Status", "Reload Skills"].includes(lines[title]!)) return null;
+  if (title < 0 || !["Status", "Reload Skills", "Version"].includes(lines[title]!)) return null;
   const hint = lines.findIndex((line, index) => index > title && /^(?:↑|end)/.test(line) && [1, 2, 3, 4, 5, 6, 7, 8].some(span => HERMES_PAGER_HINT_RE.test(lines.slice(index, index + span).join("").replace(/\s+/g, ""))));
   if (hint < 0) return null;
   const body = lines.slice(title + 1, hint).join("\n").trim();
@@ -2283,8 +2283,8 @@ function parseHermesHelp(screen: string, sent: string | null): ParsedPrompt | nu
 
 /** Classic Hermes prints command results above its status bar and bordered input box. */
 function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPrompt | null {
-  const command = sent?.trim().replace(/^\/reload_skills$/, "/reload-skills");
-  if (command !== "/help" && command !== "/status" && command !== "/reload-skills") return null;
+  const command = sent?.trim().replace(/^\/reload_skills$/, "/reload-skills").replace(/^\/v$/, "/version");
+  if (command !== "/help" && command !== "/status" && command !== "/reload-skills" && command !== "/version") return null;
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map(cleanLine);
   const input = findLastIndex(lines, line => /^(?:[\w.-]+\s+)?❯(?:\s.*)?$/.test(line));
   if (input < 0) return null;
@@ -2302,6 +2302,14 @@ function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPr
     const echo = findLastIndex(output, line => /^(?:⚙️?\s*)?\/reload[-_]skills$/.test(line));
     start = output.findIndex((line, index) => index > echo && /^(?:🔄 Reloading skills\.\.\.|No new skills detected\.|➕ Added Skills:|➖ Removed Skills:|❌ Skills reload failed:)/.test(line));
     if (end < 0 || start < 0 || start > end) return null;
+  } else if (command === "/version") {
+    start = findLastIndex(output, line => /^Hermes Agent v\d+\.\d+\.\d+\S* \([\d.\-]+\)/.test(line));
+    end = findLastIndex(output, line => /^OpenAI SDK: .+|^Update available(?::| —)|^Up to date$/.test(line));
+    if (start < 0 || end <= start) return null;
+    const body = output.slice(start + 1, end + 1).filter(Boolean);
+    if (!body.some(line => /^Install directory: .+/.test(line)) || !body.some(line => /^Python: .+/.test(line))
+      || !body.some(line => /^OpenAI SDK: .+/.test(line))
+      || !body.every(line => /^(?:Install directory: |Install method: |Python: |OpenAI SDK: |Update available(?::| —)|Up to date$|(?:⚙️?\s*)?\/(?:version|v)$)/.test(line))) return null;
   } else {
     const tip = findLastIndex(output, line => /^Tip: \/help skills lists skill commands/.test(line));
     end = findLastIndex(output, line => /^(?:Paste image: Alt\+V \(or \/paste\)|Attach image: \/image )/.test(line));
@@ -2310,10 +2318,10 @@ function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPr
   }
   if (output.slice(end + 1).some(Boolean)) return null;
   return finishPrompt("hermes", {
-    kind: "menu", title: command === "/help" ? "Help" : command === "/status" ? "Status"
+    kind: "menu", title: command === "/help" ? "Help" : command === "/status" ? "Status" : command === "/version" ? "Version"
       : /^❌ Skills reload failed:/.test(output[end]!) ? "Reload Skills failed" : "Reload Skills",
     question: "Visible terminal output; use Terminal to scroll the full output.",
-    body: output.slice(start, end + 1).join("\n").trim(),
+    body: output.slice(start, end + 1).filter(line => command !== "/version" || !/^(?:⚙️?\s*)?\/(?:version|v)$/.test(line)).join("\n").trim(),
     options: [{ label: "Dismiss", description: null }], multi_select: false, custom_option_index: null,
   }, { responder: "hermes-output", menuLabels: ["Dismiss"], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null, optionSteps: [[]] });
 }

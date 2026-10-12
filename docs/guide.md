@@ -152,12 +152,12 @@ Every agent herdr runs shows up with its live status, terminal and alerts. The c
 | **OpenCode** | Native session in OpenCode 2's own database, resolved through herdr: `~/.local/share/opencode/opencode.db` (`%USERPROFILE%\.local\share\opencode\opencode.db` on Windows), or where the server's `XDG_DATA_HOME` or `OPENCODE_DB` puts it | — use Terminal |
 | **Devin CLI** | Native SQLite session, showing the active branch when herdr or the live process explicitly identifies the session; otherwise terminal text | — use Terminal |
 | **Grok** | Linux native update log with exact process/session evidence, on the `grok-1.0.50-linux-x86_64` build only; other builds use Terminal. See [Grok setup and limits](grok-chat.md). | — use Terminal |
-| **Hermes** | Native SQLite session store; help/status/skill reload use terminal-backed result cards | Clarify questions and recognized Ink informational-pager controls; other menus use Terminal |
+| **Hermes** | Native SQLite session store; help/status/skill reload/version use terminal-backed result cards | Clarify questions and recognized Ink informational-pager controls; other menus use Terminal |
 | **Antigravity (agy)** | **Experimental; macOS untested.** Native ledger, selected by the running process’s held conversation lock. Linux native-tested; Windows uses terminal text. See [Agy behavior and limits](agy-chat.md). | — use Terminal |
 | **Anything else** | The terminal's text | — use Terminal |
 
 Hermes command suggestions include `/retry` and eligible individual skills from the selected
-native process's profile. Resolved panes also offer `/help`, `/status` and `/reload-skills`. `/help` shows
+native process's profile. Resolved panes also offer `/help`, `/status`, `/reload-skills` and `/version`. `/help` shows
 the visible native help output; **Dismiss** hides the card without typing into the terminal.
 Use Terminal to scroll the full help. Classic CLI `/status` is a read-only card with **Dismiss**.
 Ink `/status` shows the native pager's current page with **Previous page**, **Next page**
@@ -166,6 +166,10 @@ transcript turns. Unknown layouts still require Terminal. Other built-ins remain
 `/reload-skills` shows the native reload result with the same classic dismiss or Ink pager controls.
 After a successful reload, Chat refreshes command suggestions for that pane and PC without a page
 reload. Added and removed skills appear in the native result; failed reloads do not refresh suggestions.
+`/version` shows the native version and installation diagnostics, including any native update-status
+message. Classic CLI uses **Dismiss**; Ink uses its native pager controls. It does not install updates.
+`/context` remains outside suggestions: the verified installed Ink fallback runs without the live
+agent and reports "No active agent" rather than the conversation's context usage.
 Discovery reads installed native declarations without executing Python. Unresolved process
 identity exposes no profile resources. Project skills require both
 native project trust and a current safe or caution scan attestation; ambiguous modern skill
