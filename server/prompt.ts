@@ -121,6 +121,8 @@ type Responder =
   | "pi-model"
   | "hermes-question"
   | "hermes-input"
+  | "hermes-classic-approval"
+  | "hermes-tui-approval"
   | "hermes-pager"
   | "hermes-output"
   | "fallback-menu"
@@ -1891,6 +1893,7 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // Hermes keeps its status line (and maybe the hint's wrapped tail) under the hint; an answered
   // question leaves the screen, so a hint among the last few lines is the live one
   if (prompt.responder === "hermes-question" || prompt.responder === "hermes-input") return shown.slice(-4).some((line) => HERMES_HINT_RE.test(line));
+  if (prompt.responder === "hermes-classic-approval" || prompt.responder === "hermes-tui-approval") return true;
   if (prompt.responder === "hermes-pager") return true; // its complete, bottom-most native overlay is checked by the parser
   if (prompt.responder === "hermes-output") return true; // read-only output admitted only after this pane's explicit command
   if (prompt.responder === "codex-menu") return ends(CODEX_CONTINUE_HINT_RE);
@@ -2245,12 +2248,24 @@ function parseHermesPager(screen: string): ParsedPrompt | null {
   if (bottom < 0 || raw.slice(bottom + 1).filter(line => line.trim()).length > 2) return null;
   const rows = raw.slice(top + 1, bottom);
   if (!rows.every(line => /^\s*║.*║/.test(line))) return null;
-  const lines = rows.map(line => line.slice(line.indexOf("║") + 1, line.lastIndexOf("║")).trim());
+  const inner = rows.map(line => line.slice(line.indexOf("║") + 1, line.lastIndexOf("║")));
+  const lines = inner.map(line => line.trim());
   const title = lines.findIndex(Boolean);
-  if (title < 0 || !["Status", "Reload Skills", "Version"].includes(lines[title]!)) return null;
+  if (title < 0 || !["Status", "Reload Skills", "Version", "Profile", "Diff", "Review"].includes(lines[title]!)) return null;
   const hint = lines.findIndex((line, index) => index > title && /^(?:↑|end)/.test(line) && [1, 2, 3, 4, 5, 6, 7, 8].some(span => HERMES_PAGER_HINT_RE.test(lines.slice(index, index + span).join("").replace(/\s+/g, ""))));
   if (hint < 0) return null;
-  const body = lines.slice(title + 1, hint).join("\n").trim();
+  const isDiff = lines[title] === "Diff";
+  const bodyRows = inner.slice(title + 1, hint).map(line => {
+    if (isDiff) {
+      const unboxed = line.startsWith("  ") ? line.slice(2) : line.startsWith(" ") ? line.slice(1) : line;
+      return unboxed.trimEnd();
+    }
+    const unboxed = line.startsWith(" ") && line.endsWith(" ") ? line.slice(1, -1) : line.startsWith(" ") ? line.slice(1) : line;
+    return unboxed.trim();
+  });
+  while (bodyRows.length > 0 && !bodyRows[0]!.trim()) bodyRows.shift();
+  while (bodyRows.length > 0 && !bodyRows.at(-1)!.trim()) bodyRows.pop();
+  const body = isDiff ? bodyRows.join("\n") : bodyRows.join("\n").trim();
   const end = lines[hint]!.startsWith("end ·");
   const options = end ? ["Previous page", "Close"] : ["Previous page", "Next page", "Close"];
   return finishPrompt("hermes", {
@@ -2258,6 +2273,13 @@ function parseHermesPager(screen: string): ParsedPrompt | null {
     options: options.map(label => ({ label, description: null })), multi_select: false, custom_option_index: null,
   }, { responder: "hermes-pager", menuLabels: options, selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
     optionSteps: (end ? ["pageup", KEY.escape] : ["pageup", "pagedown", KEY.escape]).map(key => keySteps([key])) });
+}
+
+function hermesOutputPrompt(title: string, body: string): ParsedPrompt {
+  return finishPrompt("hermes", {
+    kind: "menu", title, question: "Visible terminal output; use Terminal to scroll the full output.",
+    body, options: [{ label: "Dismiss", description: null }], multi_select: false, custom_option_index: null,
+  }, { responder: "hermes-output", menuLabels: ["Dismiss"], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null, optionSteps: [[]] });
 }
 
 /** Help is an Ink transcript panel, not a pager or a SQLite turn. Show only its visible portion. */
@@ -2274,23 +2296,157 @@ function parseHermesHelp(screen: string, sent: string | null): ParsedPrompt | nu
   if (end < 0 || !lines.slice(start + 1, end).some(line => /\/help|Ctrl|ctrl|Enter|Tab/.test(line))) return null;
   const tail = lines.slice(end + 1).filter(Boolean);
   if (!tail.some(line => /^─?\s*ready\b/.test(line)) || !tail.every(line => /^─?\s*ready\b|^❯(?:\s+Try ".*")?$/.test(line))) return null;
-  return finishPrompt("hermes", {
-    kind: "menu", title: "Help", question: "Visible terminal output; use Terminal to scroll the full help.",
-    body: lines.slice(title >= 0 ? start + 1 : start, end).filter(line => !isDivider(line)).map(line => line.replace(/\s*┃$/, "")).join("\n").trim(),
-    options: [{ label: "Dismiss", description: null }], multi_select: false, custom_option_index: null,
-  }, { responder: "hermes-output", menuLabels: ["Dismiss"], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null, optionSteps: [[]] });
+  return hermesOutputPrompt("Help", lines.slice(title >= 0 ? start + 1 : start, end).filter(line => !isDivider(line)).map(line => line.replace(/\s*┃$/, "")).join("\n").trim());
+}
+
+/** Ink short system messages (profile, diff, review) above its ready footer. */
+function parseHermesInkOutput(screen: string, sent: string | null): ParsedPrompt | null {
+  const trimmedSent = sent?.trim() ?? "";
+  const baseCommand = trimmedSent.split(/\s+/)[0] ?? "";
+  if (baseCommand !== "/profile" && baseCommand !== "/diff" && baseCommand !== "/review") return null;
+  const rawLines = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  const unchromed = rawLines.map(line => line.replace(/\s*[┃│]$/, ""));
+  const lines = unchromed.map(cleanLine);
+  const input = findLastIndex(lines, line => /^❯(?:\s.*)?$/.test(line));
+  if (input < 0) return null;
+  const footer = findLastIndex(lines.slice(0, input), line => /^─?\s*ready\b/.test(line));
+  if (footer < 0 || lines.slice(footer + 1, input).some(Boolean)) return null;
+  const output = lines.slice(0, footer);
+  const unchromedOutput = unchromed.slice(0, footer);
+  const echo = findLastIndex(output, line => /^·\s*\/[\w-]+(?:\s.*)?$/.test(line));
+  if (echo < 0) return null;
+  const echoCmd = output[echo]!.replace(/^·\s*/, "").trim();
+  if (echoCmd.replace(/\s+/g, " ") !== trimmedSent.replace(/\s+/g, " ")) return null;
+
+  if (baseCommand === "/profile") {
+    let dotBlank = echo + 1;
+    while (dotBlank < output.length && !output[dotBlank]) dotBlank += 1;
+    if (dotBlank >= output.length || !/^·\s*$/.test(output[dotBlank]!)) return null;
+    const profileIndex = output.findIndex((line, index) => index > dotBlank && /^(?:·\s*)?Profile:\s*\S+/.test(line));
+    const homeIndex = output.findIndex((line, index) => index > profileIndex && /^(?:·\s*)?Home:\s*\S+/.test(line));
+    if (profileIndex < 0 || homeIndex < 0 || homeIndex !== profileIndex + 1) return null;
+    if (output.slice(dotBlank + 1, profileIndex).some(Boolean)) return null;
+    if (output.slice(homeIndex + 1).some(Boolean)) return null;
+    return hermesOutputPrompt("Profile", output.slice(profileIndex, homeIndex + 1).map(l => l.replace(/^·\s*/, "")).join("\n").trim());
+  }
+
+  if (baseCommand === "/diff") {
+    let diffStart = echo + 1;
+    while (diffStart < output.length && !output[diffStart]) diffStart += 1;
+    if (diffStart >= output.length) return null;
+    const firstLine = output[diffStart]!.replace(/^·\s*/, "");
+    const isHeader = /^(?:Unstaged:|Staged:|All \(vs HEAD\):)$/.test(firstLine);
+    const isEmpty = firstLine === "No changes.";
+    const isError = firstLine === "Not a git repository." || firstLine === "No active agent session." || /^Checkpoints? (?:are )?disabled\b/i.test(firstLine);
+    if (!isHeader && !isEmpty && !isError) return null;
+    let diffEnd = diffStart;
+    if (isHeader) {
+      diffEnd = output.length - 1;
+      while (diffEnd > diffStart && !output[diffEnd]) diffEnd -= 1;
+    } else if (isError && /^Checkpoints? (?:are )?disabled\b/i.test(firstLine)) {
+      while (diffEnd + 1 < output.length && output[diffEnd + 1] && !output[diffEnd + 1]!.startsWith("·")) diffEnd += 1;
+    }
+    if (output.slice(diffEnd + 1).some(Boolean)) return null;
+    if (isEmpty || (isError && diffStart === diffEnd)) {
+      return hermesOutputPrompt("Diff", firstLine);
+    }
+    const diffLines = unchromedOutput.slice(diffStart, diffEnd + 1).map(l => l.replace(/^· ?/, "").trimEnd());
+    while (diffLines.length > 0 && !diffLines[0]!.trim()) diffLines.shift();
+    while (diffLines.length > 0 && !diffLines.at(-1)!.trim()) diffLines.pop();
+    if (diffLines.length === 0) return null;
+    return hermesOutputPrompt("Diff", diffLines.join("\n"));
+  }
+
+  if (baseCommand === "/review") {
+    let reviewStart = echo + 1;
+    while (reviewStart < output.length && !output[reviewStart]) reviewStart += 1;
+    if (reviewStart >= output.length) return null;
+    const firstLine = output[reviewStart]!.replace(/^·\s*/, "");
+    if (!/^⚖\s*Review subagent dispatched\.\.\./.test(firstLine)) return null;
+    let reviewEnd = reviewStart;
+    while (reviewEnd + 1 < output.length && output[reviewEnd + 1]) reviewEnd += 1;
+    if (output.slice(reviewEnd + 1).some(Boolean)) return null;
+    const reviewLines = unchromedOutput.slice(reviewStart, reviewEnd + 1).map(l => l.replace(/^·\s*/, "").trimEnd());
+    return hermesOutputPrompt("Review", reviewLines.join("\n").trim());
+  }
+
+  return null;
 }
 
 /** Classic Hermes prints command results above its status bar and bordered input box. */
 function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPrompt | null {
-  const command = sent?.trim().replace(/^\/reload_skills$/, "/reload-skills").replace(/^\/v$/, "/version");
-  if (command !== "/help" && command !== "/status" && command !== "/reload-skills" && command !== "/version") return null;
-  const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map(cleanLine);
+  const trimmedSent = sent?.trim() ?? "";
+  const command = trimmedSent.replace(/^\/reload_skills$/, "/reload-skills").replace(/^\/v$/, "/version");
+  const baseCommand = command.split(/\s+/)[0] ?? "";
+  if (baseCommand !== "/help" && baseCommand !== "/status" && baseCommand !== "/reload-skills" && baseCommand !== "/version"
+    && baseCommand !== "/profile" && baseCommand !== "/diff" && baseCommand !== "/review") return null;
+  const rawLines = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  const lines = rawLines.map(cleanLine);
   const input = findLastIndex(lines, line => /^(?:[\w.-]+\s+)?❯(?:\s.*)?$/.test(line));
   if (input < 0) return null;
-  const footer = findLastIndex(lines.slice(0, input), line => /^⚕\s.+│/.test(line));
+  const footer = findLastIndex(lines.slice(0, input), line => /^[⚕☤]\s.+│/.test(line));
   if (footer < 0 || lines.slice(footer + 1, input).some(line => line && !isDivider(line))) return null;
   const output = lines.slice(0, footer);
+  const rawOutput = rawLines.slice(0, footer);
+
+  if (baseCommand === "/profile") {
+    const echo = findLastIndex(output, line => /^(?:⚙️?\s*)?\/profile(?:\s+\S+)?$/.test(line));
+    if (echo < 0) return null;
+    const echoCmd = output[echo]!.replace(/^(?:⚙️?\s*)?/, "").trim();
+    if (echoCmd.replace(/\s+/g, " ") !== command.replace(/\s+/g, " ")) return null;
+    const profileIndex = output.findIndex((line, index) => index > echo && /^Profile:\s*\S+/.test(line));
+    const homeIndex = output.findIndex((line, index) => index > profileIndex && /^Home:\s*\S+/.test(line));
+    if (profileIndex < 0 || homeIndex < 0 || homeIndex !== profileIndex + 1) return null;
+    if (output.slice(echo + 1, profileIndex).some(Boolean)) return null;
+    if (output.slice(homeIndex + 1).some(Boolean)) return null;
+    return hermesOutputPrompt("Profile", output.slice(profileIndex, homeIndex + 1).join("\n").trim());
+  }
+
+  if (baseCommand === "/diff") {
+    const echo = findLastIndex(output, line => /^(?:⚙️?\s*)?\/diff(?:\s+.*)?$/.test(line));
+    if (echo < 0) return null;
+    const echoCmd = output[echo]!.replace(/^(?:⚙️?\s*)?/, "").trim();
+    if (echoCmd.replace(/\s+/g, " ") !== command.replace(/\s+/g, " ")) return null;
+    let diffStart = echo + 1;
+    while (diffStart < output.length && !output[diffStart]) diffStart += 1;
+    if (diffStart >= output.length) return null;
+    const firstLine = output[diffStart]!;
+    const isHeader = /^(?:Unstaged:|Staged:|All \(vs HEAD\):)$/.test(firstLine);
+    const isEmpty = firstLine === "No changes.";
+    const isError = firstLine === "Not a git repository." || firstLine === "No active agent session." || /^Checkpoints? (?:are )?disabled\b/i.test(firstLine);
+    if (!isHeader && !isEmpty && !isError) return null;
+    let diffEnd = diffStart;
+    if (isHeader) {
+      diffEnd = output.length - 1;
+      while (diffEnd > diffStart && !output[diffEnd]) diffEnd -= 1;
+    } else if (isError && /^Checkpoints? (?:are )?disabled\b/i.test(firstLine)) {
+      while (diffEnd + 1 < output.length && output[diffEnd + 1] && !output[diffEnd + 1]!.startsWith("⚙️")) diffEnd += 1;
+    }
+    if (output.slice(diffEnd + 1).some(Boolean)) return null;
+    if (isEmpty || (isError && diffStart === diffEnd)) {
+      return hermesOutputPrompt("Diff", firstLine);
+    }
+    const diffLines = rawOutput.slice(diffStart, diffEnd + 1).map(l => l.trimEnd());
+    while (diffLines.length > 0 && !diffLines[0]!.trim()) diffLines.shift();
+    while (diffLines.length > 0 && !diffLines.at(-1)!.trim()) diffLines.pop();
+    if (diffLines.length === 0) return null;
+    return hermesOutputPrompt("Diff", diffLines.join("\n"));
+  }
+
+  if (baseCommand === "/review") {
+    const echo = findLastIndex(output, line => /^(?:⚙️?\s*)?\/review(?:\s+.*)?$/.test(line));
+    if (echo < 0) return null;
+    const echoCmd = output[echo]!.replace(/^(?:⚙️?\s*)?/, "").trim();
+    if (echoCmd.replace(/\s+/g, " ") !== command.replace(/\s+/g, " ")) return null;
+    let reviewStart = echo + 1;
+    while (reviewStart < output.length && !output[reviewStart]) reviewStart += 1;
+    if (reviewStart >= output.length || !/^⚖\s*Review subagent dispatched\.\.\./.test(output[reviewStart]!)) return null;
+    let reviewEnd = reviewStart;
+    while (reviewEnd + 1 < output.length && output[reviewEnd + 1]) reviewEnd += 1;
+    if (output.slice(reviewEnd + 1).some(Boolean)) return null;
+    return hermesOutputPrompt("Review", output.slice(reviewStart, reviewEnd + 1).join("\n").trim());
+  }
+
   let start: number, end: number;
   if (command === "/status") {
     start = findLastIndex(output, line => line === "Hermes CLI Status");
@@ -2317,13 +2473,137 @@ function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPr
     if (tip < 0 || start < 0 || start >= tip || end < tip) return null;
   }
   if (output.slice(end + 1).some(Boolean)) return null;
-  return finishPrompt("hermes", {
-    kind: "menu", title: command === "/help" ? "Help" : command === "/status" ? "Status" : command === "/version" ? "Version"
+  return hermesOutputPrompt(
+    command === "/help" ? "Help" : command === "/status" ? "Status" : command === "/version" ? "Version"
       : /^❌ Skills reload failed:/.test(output[end]!) ? "Reload Skills failed" : "Reload Skills",
-    question: "Visible terminal output; use Terminal to scroll the full output.",
-    body: output.slice(start, end + 1).filter(line => command !== "/version" || !/^(?:⚙️?\s*)?\/(?:version|v)$/.test(line)).join("\n").trim(),
-    options: [{ label: "Dismiss", description: null }], multi_select: false, custom_option_index: null,
-  }, { responder: "hermes-output", menuLabels: ["Dismiss"], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null, optionSteps: [[]] });
+    output.slice(start, end + 1).filter(line => command !== "/version" || !/^(?:⚙️?\s*)?\/(?:version|v)$/.test(line)).join("\n").trim()
+  );
+}
+
+/** Hermes v0.21: cli.py's rounded prompt_toolkit panels and ui-tui's double-border prompts.
+ * Read the entire panel, never a logged summary or a command preview hiding its tail. */
+const HERMES_CLASSIC_APPROVAL_HINT = /^↑\/↓ to select, Enter to confirm\s+\([1-9]\d*s\)$/;
+const HERMES_TUI_APPROVAL_HINT = /^↑\/↓ select · Enter confirm · 1-(\d) quick pick · (?:Esc\/)?Ctrl\+C deny$/;
+const HERMES_TRUNCATED_RE = /…|\(command truncated|\(description truncated|\(detail truncated/;
+const HERMES_TOOL_PROGRESS_RE = /^(?:✍️?|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|[\u2800-\u28ff]|⚡|⚙️)\s+(\S.*?)(?:\s+\(?\s*(?:\d+m\s*)?\d+(?:\.\d+)?s(?:\s*·\s*↓\s*\d+\s*tok)?\))?$/;
+/** Only native chrome may follow the panel. */
+function hermesTail(lines: string[], end: number, classic: boolean): boolean {
+  const tail = lines.slice(end + 1).map((line) => line.replace(ANSI_RE, "").trim().replace(/^[│║]\s?/, "").replace(/\s?[│║]$/, "").trim()).filter(Boolean);
+  if (!classic) return tail.length <= 2 && tail.every((line) => /^─(?:\s|─)/.test(line));
+  const hint = HERMES_CLASSIC_APPROVAL_HINT;
+  let hintEnd = -1;
+  for (let span = 1; span <= Math.min(4, tail.length); span += 1) {
+    if (hint.test(tail.slice(0, span).join(" "))) { hintEnd = span; break; }
+  }
+  if (hintEnd < 0 && tail.length > 0 && HERMES_TOOL_PROGRESS_RE.test(tail[0]!)) {
+    for (let span = 1; span <= Math.min(4, tail.length - 1); span += 1) {
+      if (hint.test(tail.slice(1, 1 + span).join(" "))) { hintEnd = 1 + span; break; }
+    }
+  }
+  if (hintEnd < 0) return false;
+  const rest = tail.slice(hintEnd);
+  let composer = false;
+  for (const line of rest) {
+    if (/^─+$/.test(line) || /^[⚕☤]\s/.test(line)) continue;
+    const input = line.match(/^⚠\s*[❯›>]\s*(.*)$/);
+    if (!input || composer) return false;
+    composer = true;
+  }
+  return rest.length <= 6 && composer;
+}
+
+/** Recognizes and parses classic CLI and default TUI Hermes approval panels. */
+function parseHermesPrompt(screen: string): ParsedPrompt | null {
+  const raw = screen.replace(ANSI_RE, "").split(/\r?\n/).map((line) => line.replace(/([╭╔╰╚║│].*[╮╗╰╝║│])\s*[┃│]\s*$/, "$1"));
+  const start = findLastIndex(raw, (line) => /^\s*[╭╔][─═]+[╮╗]\s*$/.test(line));
+  if (start < 0) return null;
+  const classic = raw[start]!.trim().startsWith("╭");
+  const end = raw.findIndex((line, index) => index > start && (classic ? /^\s*╰─+╯\s*$/ : /^\s*╚═+╝\s*$/).test(line));
+  if (end < 0 || raw.slice(start + 1, end).some((line) => !(classic ? /^\s*│.*│\s*$/ : /^\s*║.*║\s*$/).test(line))) return null;
+  const panel = raw.slice(start + 1, end).map((line) => line.replace(ANSI_RE, "").trim().replace(/^[│║]\s?/, "").replace(/\s?[│║]$/, "").trim());
+  // Remove only the renderer's border padding. Leading whitespace in a multiline shell
+  // command can be meaningful and must not collide with an otherwise identical command.
+  const content = raw.slice(start + 1, end).map((line) => line.replace(/^\s*[│║] ?/, "").replace(/ ?[│║]\s*$/, "").trimEnd());
+  const title = panel[0] ?? "";
+  // The native footer and allow/deny rows below identify an approval; repainting can damage its decorative caption.
+  const approval = classic ? /^⚠️?\s+Dangerous Command$/i.test(title) : /^⚠️?\s*\S.* required · \S/i.test(title);
+  if (!approval) return null;
+  if (!hermesTail(raw, end, classic)) return null;
+  if (panel.some((line) => HERMES_TRUNCATED_RE.test(line))) return null;
+  let footer = panel.length;
+  let hint: string | null = null;
+  if (!classic) {
+    for (let span = 1; span <= Math.min(5, panel.length); span += 1) {
+      const candidate = normalizeText(panel.slice(-span).join(" "));
+      if (HERMES_TUI_APPROVAL_HINT.test(candidate)) {
+        footer = panel.length - span;
+        hint = candidate;
+        break;
+      }
+    }
+    if (hint === null) return null;
+  }
+  const rowShape = /^(❯|▸)?\s*(\d+)\.?\s+(.+)$/;
+  const first = panel.findIndex((line) => rowShape.test(line));
+  let rows: { label: string; description: string | null; selected: boolean }[] = [];
+  let last = first;
+  if (first < 1) return null;
+  for (let index = first; index < footer; index += 1) {
+    const match = panel[index]!.match(rowShape);
+    if (!match) {
+      if (!panel[index]) break;
+      const previous = rows.at(-1);
+      if (!previous || !/^\s*[│║] {4,}\S/.test(raw[start + 1 + index]!)) break;
+      previous.label += ` ${panel[index]}`;
+      last = index;
+      continue;
+    }
+    if (Number(match[2]) !== rows.length + 1) return null;
+    rows.push({ label: match[3]!, description: null, selected: Boolean(match[1]) });
+    last = index;
+  }
+  const allowed = classic
+    ? ["Allow once", "Allow for this session", "Add to permanent allowlist", "Deny", "Show full command"]
+    : ["Allow once", "Allow this session", "Always allow", "Deny"];
+  if (rows[0]?.label !== allowed[0] || !rows.some((row) => row.label === "Deny") || rows.some((row) => !allowed.includes(row.label))) return null;
+  const order = rows.map((row) => allowed.indexOf(row.label));
+  if (order.some((value, index) => index > 0 && value <= order[index - 1]!)) return null;
+  if (!classic && Number(HERMES_TUI_APPROVAL_HINT.exec(hint ?? "")?.[1]) !== rows.length) return null;
+
+  const body = [...content.slice(1, first), ...content.slice(last + 1, footer)].filter((line) => line.trim()).join("\n");
+
+  let stableTarget: string | undefined;
+  if (classic) {
+    const tailLines = raw.slice(end + 1).map((line) => line.replace(ANSI_RE, "").trim().replace(/^[│║]\s?/, "").replace(/\s?[│║]$/, "").trim()).filter(Boolean);
+    if (tailLines.length > 0 && !HERMES_CLASSIC_APPROVAL_HINT.test(tailLines[0]!)) {
+      const match = tailLines[0]!.match(HERMES_TOOL_PROGRESS_RE);
+      if (match) {
+        stableTarget = match[1]!.trim();
+        const targetFile = stableTarget.split("/").pop() ?? stableTarget;
+        if (!body.includes(targetFile) && !body.includes(stableTarget)) return null;
+      }
+    }
+  }
+
+  return hermesPrompt(title, body, rows, classic ? "hermes-classic-approval" : "hermes-tui-approval", stableTarget);
+}
+
+/** Finalizes an approval prompt model from parsed Hermes dialog rows and options. */
+function hermesPrompt(
+  title: string,
+  body: string,
+  rows: { label: string; description: string | null; selected: boolean }[],
+  responder: Responder,
+  target?: string,
+): ParsedPrompt | null {
+  if (!body || body.length > 12_000 || rows.length < 2 || rows.length > 5 || rows.filter((row) => row.selected).length !== 1) return null;
+  return finishPrompt("hermes", {
+    kind: "approval", title, question: title, body,
+    options: rows.map(({ label, description }) => ({ label, description })), multi_select: false, custom_option_index: null,
+  }, {
+    responder, menuLabels: rows.map((row) => row.label), selectedIndex: rows.findIndex((row) => row.selected),
+    checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
+  }, target ? { call: target } : {});
 }
 
 function parseHermesClarify(screen: string): ParsedPrompt | null {
@@ -2419,7 +2699,7 @@ function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null
         : agent === "pi"
           ? [parsePiModel(screen), parsePiDialog(screen), ...omo()]
         : agent === "hermes"
-          ? [parseHermesClarify(screen), parseHermesPager(screen), working ? null : parseHermesHelp(screen, sent), working ? null : parseHermesClassicOutput(screen, sent)]
+          ? [parseHermesPrompt(screen), parseHermesClarify(screen), parseHermesPager(screen), working ? null : parseHermesHelp(screen, sent), working ? null : parseHermesInkOutput(screen, sent), working ? null : parseHermesClassicOutput(screen, sent)]
         : agent === "omo" || agent === ""
           ? omo()
           : [];
@@ -2865,6 +3145,7 @@ function askingEnded(paneId: string): void {
  * question.
  */
 export function promptWaitEnded(paneId: string): void {
+  hermesAnswered.delete(paneId);
   if (!askings.get(paneId)?.queued) askingEnded(paneId);
 }
 
@@ -2876,6 +3157,10 @@ function contentId(prompt: InteractivePrompt | null): string | undefined {
 /** When each pane's omo form was last answered from the chat (see readPrompt). */
 const formsAnswered = new Map<string, number>();
 const FORM_SETTLE_MS = 3_000;
+
+/** A committed Hermes panel can linger through a delayed redraw. It is not another asking
+ * until the screen changes or the collector observes the agent back at work. */
+const hermesAnswered = new Map<string, string>();
 
 /** Each pane's rollout, resolved for its collapsed queue: a poll every 2s would otherwise redo it. */
 const queueRollouts = new Map<string, { path: string | null; at: number }>();
@@ -3153,10 +3438,12 @@ async function readPrompt(paneId: string, codexHome?: string): Promise<{ agent: 
   for (const known of answerTurns.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) answerTurns.delete(known);
   for (const known of heldCandidates.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) heldCandidates.delete(known);
   for (const known of chatSent.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) chatSent.delete(known);
+  for (const known of hermesAnswered.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) hermesAnswered.delete(known);
   const pane = panes.find((candidate) => candidate.pane_id === paneId);
   if (!pane) throw new HerdrError("pane_not_found", `pane ${paneId} not found`);
   const agent = pane.agent ?? "";
   const status = pane.agent_status;
+  if (status === "working") hermesAnswered.delete(paneId);
   // counted right before the screen is read, after the snapshot: what matters is whether an
   // answer ran while the screen was being read
   const turns = answerTurns.get(paneId) ?? 0;
@@ -3164,7 +3451,7 @@ async function readPrompt(paneId: string, codexHome?: string): Promise<{ agent: 
   // an omo form just answered has closed, while herdr still reports the wait for a moment: that
   // is no screen to answer, and its fallback card would flash up after the form's last answer
   const settling = Date.now() - (formsAnswered.get(paneId) ?? 0) < FORM_SETTLE_MS;
-  if (known.prompt !== null || status !== "blocked" || !agent || settling) {
+  if (known.prompt !== null || known.suppressed || status !== "blocked" || !agent || settling) {
     fallbackLogged.delete(paneId);
     return { agent, status, prompt: asked(paneId, known.prompt, turns), pane, panes };
   }
@@ -3212,7 +3499,7 @@ async function readKnownPrompt(
   agent: string,
   codexHome?: string,
   panes: HerdrPane[] = [],
-): Promise<{ prompt: InteractivePrompt | null; screen?: string }> {
+): Promise<{ prompt: InteractivePrompt | null; screen?: string; suppressed?: boolean }> {
   if (!["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", ""].includes(agent)) return { prompt: null };
   const screen = await liveScreen(paneId);
   // omo's form reads its text from the session's call, the screen showing where the form stands
@@ -3222,6 +3509,13 @@ async function readKnownPrompt(
   // on the user, or the session's pending call is the form on screen
   const omoTrusted = (agent !== "claude" && agent !== "") || pane.agent_status === "blocked";
   const prompt = parseInteractivePrompt(agent, screen, omoAsks[0] ?? null, omoTrusted, omoAsks, agent === "claude" ? heldCandidate(paneId) : agent === "hermes" ? lastChatSubmitted(paneId) : null, pane.agent_status === "working");
+  if (agent === "hermes") {
+    if (pane.agent_status === "working") hermesAnswered.delete(paneId);
+    else if (hermesAnswered.has(paneId)) {
+      if (contentId(prompt) === hermesAnswered.get(paneId)) return { prompt: null, screen, suppressed: true };
+      hermesAnswered.delete(paneId);
+    }
+  }
   if (prompt && await claudeHeldIsGrey(paneId, prompt)) return { prompt: null, screen };
   if (!prompt && agent === "gjc") {
     const fallback = parseFallbackPrompt(agent, screen);
@@ -3475,7 +3769,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         // Claude's unnumbered rows and pi's models are read with no number to aim at: looked at
         // again before the Enter even when it needs no move. So is Claude's model list, picked
         // with a letter: typed after the list has gone, it would stand in the agent's own prompt
-        let moved = responder === "claude-confirm" || responder === "pi-model" || responder === "omo-question" || responder === "claude-model" || responder === "claude-effort" || responder === "codex-model" || responder === "fallback-gjc-menu";
+        let moved = responder.startsWith("hermes-") || responder === "claude-confirm" || responder === "pi-model" || responder === "omo-question" || responder === "claude-model" || responder === "claude-effort" || responder === "codex-model" || responder === "fallback-gjc-menu";
         // Claude's and Codex's model lists: a window on a list, picked with a letter; Claude's effort
         // slider the same way, its levels side by side
         const list = responder === "claude-model" || responder === "claude-effort" || responder === "codex-model";
@@ -3537,7 +3831,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           // keys to the agent's own prompt, where an arrow walks the prompt's history: each move
           // after the first goes only once the list shows the one before it
           // GJC's selector the same: dismissed under the answer, its composer would take the moves
-          if (move && walked && (list || responder === "fallback-gjc-menu") && !(await onRow())) return promptChanged();
+        if (move && walked && (list || responder.startsWith("hermes-") || responder === "fallback-gjc-menu") && !(await onRow())) return promptChanged();
           if (!move && !committed) {
             // An answer is only as good as the menu and the cursor it moves from, and both are
             // as old as the read above by the time its moves are done: the menu answered in the
@@ -3585,8 +3879,12 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         if (queueOpened && !answered) await closeOpenQuestion(body.pane_id).catch(() => undefined);
         // answered, or as good as: the same prompt on the screen after this is asked anew
         if (committed) askingEnded(body.pane_id);
+        const responder = parsedByPublicPrompt.get(target)?.responder;
+        if (committed && (responder === "hermes-question" || responder === "hermes-input" || responder === "hermes-classic-approval" || responder === "hermes-tui-approval")) {
+          hermesAnswered.set(body.pane_id, contentId(target)!);
+        }
         // sent or dropped from its card: the same words in the box after this are a new message
-        if (committed && parsedByPublicPrompt.get(target)?.responder === "claude-held") heldCandidates.delete(body.pane_id);
+        if (committed && responder === "claude-held") heldCandidates.delete(body.pane_id);
       }
       // answered from the chat, the queue closes again: the next question waits collapsed, and
       // the main prompt (where a message typed in the chat goes) has the input back

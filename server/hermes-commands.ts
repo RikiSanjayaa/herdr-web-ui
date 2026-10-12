@@ -236,7 +236,12 @@ export function discoverHermesSkills(cwd: string | null | undefined, context: He
     const platform = context.env.HERMES_PLATFORM || context.env.HERMES_SESSION_PLATFORM;
     for (const name of strings(mapping(skills.platform_disabled)[platform ?? ""])) disabled.add(name);
     disabled.delete("hermes-agent");
-    const reserved = new Set([...context.coreCommands, ...Object.keys(mapping(config.quick_commands))]);
+    const reserved = new Set([
+      ...HERMES_BUILTIN_COMMANDS.map(command => command.name),
+      "help", "status", "reload-skills", "version", "profile", "diff", "plan", "review", "init",
+      ...context.coreCommands,
+      ...Object.keys(mapping(config.quick_commands)),
+    ]);
     const bundlesDir = context.env.HERMES_BUNDLES_DIR ? expand(context.env.HERMES_BUNDLES_DIR, context) : join(context.home, "skill-bundles");
     if (existsSync(bundlesDir)) {
       for (const entry of readdirSync(bundlesDir).sort(compare)) {
@@ -312,6 +317,11 @@ export function hermesCommands(cwd?: string | null, context?: HermesCommandConte
       { name: "status", description: "Show native session status (terminal-backed card)", source: "builtin" as const },
       { name: "reload-skills", description: "Reload native skills and refresh Chat suggestions", source: "builtin" as const },
       { name: "version", description: "Show native version and installation diagnostics", source: "builtin" as const },
+      { name: "profile", description: "Show active profile name and home directory", source: "builtin" as const },
+      { name: "diff", description: "Show git working changes or session diff", source: "builtin" as const },
+      { name: "plan", description: "Write an implementation plan to .hermes/plans/ without executing tasks", source: "builtin" as const },
+      { name: "review", description: "Spawn a background subagent to review recent conversation work", source: "builtin" as const },
+      { name: "init", description: "Generate or update AGENTS.md instructions (prompts model, requires write approval)", source: "builtin" as const },
     ] : []),
     ...(context ? discoverHermesSkills(cwd, context) : []),
   ];

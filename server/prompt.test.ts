@@ -38,11 +38,12 @@ const hermesHelpOutput = "│ TUI │\n│ /logs Show recent gateway log lines �
 function hermesStatusOutput(body = "Model: test-model\nTokens: 0", end = false, wrapped = false): string {
   const hint = end ? "end · ↑↓/jk · b/PgUp back · g top · Esc/q close (9 lines)" : "↑↓/jk line · Enter/Space/PgDn page · b/PgUp back · g/G top/bottom · Esc/q close (5/9)";
   const hints = wrapped ? [hint.slice(0, 48), hint.slice(48)] : [hint];
-  return ["╔" + "═".repeat(110) + "╗", ...["", "Status", "", ...body.split("\n"), "", ...hints, ""].map(line => `║ ${line.padEnd(108)} ║ backdrop must not enter the card`), "╚" + "═".repeat(110) + "╝"].join("\n");
+  return ["╔" + "═".repeat(110) + "╗", ...["", "Status", "", ...body.split("\n"), "", ...hints, ""].map(line => `║  ${line.padEnd(106)}  ║ backdrop must not enter the card`), "╚" + "═".repeat(110) + "╝"].join("\n");
 }
 const hermesClassicStatus = "Hermes CLI Status\nSession ID: test-session\nPath: /tmp/test-home\nModel: test-model (custom)\nTokens: 0\nAgent Running: No";
 const hermesClassicHelp = "/reload-skills - Re-scan skills\n── Exit ──\n/quit - Exit the CLI\nTip: /help skills lists skill commands · /help <text> filters · Ctrl+P opens the command palette\nMulti-line: Ctrl+J, Alt+Enter, or \\\\+Enter for a new line\nDraft editor: Ctrl+G (Alt+G in VSCode/Cursor)\nPaste image: Alt+V (or /paste)";
 const hermesClassicOutput = (body: string) => `${body}\n⚕ test-model │ ctx -- │ 2s\n────────────────────────────────\n❯ Research this topic\n────────────────────────────────`;
+const hermesClassicReadyOutput = (body: string, draft = "") => `${body}\n⚕ test-model │ ctx -- │ 2s\n────────────────────────────────\n❯${draft ? " " + draft : ""}\n────────────────────────────────`;
 
 describe("Hermes native informational output", () => {
   test("extracts the status overlay without its underlying transcript", () => {
@@ -126,6 +127,262 @@ describe("Hermes native informational output", () => {
     expect(prompt.title).toBe("Version");
     expect(prompt.body).toBe(body);
     expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
+  });
+  test("extracts classic profile and rejects partial or stale output while allowing placeholder draft input", () => {
+    const body = "Profile: default\nHome: /tmp/selected-home";
+    const screen = hermesClassicReadyOutput(`⚙️ /profile\n${body}`);
+    const prompt = parseInteractivePrompt("hermes", screen, null, true, [], "/profile")!;
+    expect(parseInteractivePrompt("hermes", screen.replace("⚕", "☤"), null, true, [], "/profile")?.body).toBe(body);
+    expect(prompt.title).toBe("Profile");
+    expect(prompt.body).toBe(body);
+    expect(labels(prompt)).toEqual(["Dismiss"]);
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([]);
+
+    // partial profile
+    expect(parseInteractivePrompt("hermes", hermesClassicReadyOutput("⚙️ /profile\nProfile: default"), null, true, [], "/profile")).toBeNull();
+    expect(parseInteractivePrompt("hermes", hermesClassicReadyOutput("⚙️ /profile\nHome: /tmp/selected-home"), null, true, [], "/profile")).toBeNull();
+
+    // stale profile followed by assistant response or wrong ticket
+    expect(parseInteractivePrompt("hermes", hermesClassicReadyOutput(`⚙️ /profile\n${body}\nNew assistant response`), null, true, [], "/profile")).toBeNull();
+    expect(parseInteractivePrompt("hermes", screen, null, true, [], "/status")).toBeNull();
+
+    // nonempty native input line (e.g. placeholder) displays result with key-free Dismiss
+    const nonemptyPrompt = parseInteractivePrompt("hermes", hermesClassicReadyOutput(`⚙️ /profile\n${body}`, "What changed in this repo recently?"), null, true, [], "/profile")!;
+    expect(nonemptyPrompt.title).toBe("Profile");
+    expect(nonemptyPrompt.body).toBe(body);
+    expect(labels(nonemptyPrompt)).toEqual(["Dismiss"]);
+    expect(answerKeys(nonemptyPrompt, { option_index: 0 })).toEqual([]);
+  });
+  test("preserves diff leading whitespace, handles empty changes, errors, and arguments", () => {
+    const diffBody = "Unstaged:\n 1 file changed, 2 insertions(+)\ndiff --git a/foo.ts b/foo.ts\n--- a/foo.ts\n+++ b/foo.ts\n@@ -1,3 +1,4 @@\n   context line\n+  indented addition\n+    nested addition";
+    const screen = hermesClassicReadyOutput(`⚙️ /diff\n${diffBody}`);
+    const prompt = parseInteractivePrompt("hermes", screen, null, true, [], "/diff")!;
+    expect(prompt.title).toBe("Diff");
+    expect(prompt.body).toBe(diffBody);
+    expect(prompt.body).toContain("   context line");
+    expect(prompt.body).toContain("+  indented addition");
+    expect(prompt.body).toContain("+    nested addition");
+    expect(prompt.body).toContain(" 1 file changed, 2 insertions(+)");
+
+    // empty diff
+    const emptyScreen = hermesClassicReadyOutput("⚙️ /diff\nNo changes.");
+    const emptyPrompt = parseInteractivePrompt("hermes", emptyScreen, null, true, [], "/diff")!;
+    expect(emptyPrompt.title).toBe("Diff");
+    expect(emptyPrompt.body).toBe("No changes.");
+
+    // diff errors
+    for (const err of ["Not a git repository.", "No active agent session.", "Checkpoints are disabled in configuration."]) {
+      const errScreen = hermesClassicReadyOutput(`⚙️ /diff\n${err}`);
+      const errPrompt = parseInteractivePrompt("hermes", errScreen, null, true, [], "/diff")!;
+      expect(errPrompt.title).toBe("Diff");
+      expect(errPrompt.body).toBe(err);
+    }
+
+    // diff arguments
+    for (const args of ["staged", "all", "session", "--stat", "src/foo.ts"]) {
+      const argScreen = hermesClassicReadyOutput(`⚙️ /diff ${args}\nNo changes.`);
+      const argPrompt = parseInteractivePrompt("hermes", argScreen, null, true, [], `/diff ${args}`)!;
+      expect(argPrompt.title).toBe("Diff");
+      expect(argPrompt.body).toBe("No changes.");
+      expect(parseInteractivePrompt("hermes", argScreen, null, true, [], "/diff")).toBeNull();
+    }
+    const nonemptyDiffPrompt = parseInteractivePrompt("hermes", hermesClassicReadyOutput(`⚙️ /diff\n${diffBody}`, "Explain this error and how to fix it"), null, true, [], "/diff")!;
+    expect(nonemptyDiffPrompt.title).toBe("Diff");
+    expect(nonemptyDiffPrompt.body).toBe(diffBody);
+    expect(labels(nonemptyDiffPrompt)).toEqual(["Dismiss"]);
+    expect(answerKeys(nonemptyDiffPrompt, { option_index: 0 })).toEqual([]);
+  });
+  test("parses classic review dispatch note", () => {
+    const screen = hermesClassicReadyOutput("⚙️ /review\n⚖ Review subagent dispatched...");
+    const prompt = parseInteractivePrompt("hermes", screen, null, true, [], "/review")!;
+    expect(prompt.title).toBe("Review");
+    expect(prompt.body).toBe("⚖ Review subagent dispatched...");
+  });
+  test("parses short Ink output for profile, diff, and review", () => {
+    const inkProfile = "· /profile\n·\nProfile: default\nHome: /tmp/selected-home\n─ ready │ test model │ 1 session\n❯";
+    const pProfile = parseInteractivePrompt("hermes", inkProfile, null, true, [], "/profile")!;
+    expect(pProfile.title).toBe("Profile");
+    expect(pProfile.body).toBe("Profile: default\nHome: /tmp/selected-home");
+    expect(labels(pProfile)).toEqual(["Dismiss"]);
+    expect(answerKeys(pProfile, { option_index: 0 })).toEqual([]);
+
+    const inkChrome = "· /profile                             ┃\n·                                      ┃\nProfile: default                       ┃\nHome: /tmp/selected-home               ┃\n─ ready │ test model │ 1 session       ┃\n❯                                      ┃";
+    expect(parseInteractivePrompt("hermes", inkChrome, null, true, [], "/profile")?.body).toBe("Profile: default\nHome: /tmp/selected-home");
+
+    const pDraft = parseInteractivePrompt("hermes", inkProfile.replace("❯", "❯ typed draft"), null, true, [], "/profile")!;
+    expect(pDraft.body).toBe("Profile: default\nHome: /tmp/selected-home");
+    expect(answerKeys(pDraft, { option_index: 0 })).toEqual([]);
+
+    const inkDiffIndented = "· /diff\n· Unstaged:\n·   @@ -1,3 +1,3 @@\n·    context\n· +  indented_code\n─ ready │ test model │ 1 session\n❯";
+    const pDiffIndented = parseInteractivePrompt("hermes", inkDiffIndented, null, true, [], "/diff")!;
+    expect(pDiffIndented.title).toBe("Diff");
+    expect(pDiffIndented.body).toBe("Unstaged:\n  @@ -1,3 +1,3 @@\n   context\n+  indented_code");
+
+    const inkDiff = "· /diff\n· No changes.\n─ ready │ test model │ 1 session\n❯";
+    const pDiff = parseInteractivePrompt("hermes", inkDiff, null, true, [], "/diff")!;
+    expect(pDiff.title).toBe("Diff");
+    expect(pDiff.body).toBe("No changes.");
+
+    const inkDiffErr = "· /diff\n· Not a git repository.\n─ ready │ test model │ 1 session\n❯";
+    expect(parseInteractivePrompt("hermes", inkDiffErr, null, true, [], "/diff")?.body).toBe("Not a git repository.");
+
+    const inkReview = "· /review\n⚖ Review subagent dispatched...\n─ ready │ test model │ 1 session\n❯";
+    const pReview = parseInteractivePrompt("hermes", inkReview, null, true, [], "/review")!;
+    expect(pReview.title).toBe("Review");
+    expect(pReview.body).toBe("⚖ Review subagent dispatched...");
+  });
+  test("recognizes native Profile, Diff, and Review pagers", () => {
+    const p1 = parseInteractivePrompt("hermes", hermesStatusOutput("Profile: default\nHome: /tmp/selected-home", true).replace("Status", "Profile"))!;
+    expect(p1.title).toBe("Profile");
+    expect(p1.body).toBe("Profile: default\nHome: /tmp/selected-home");
+    expect(labels(p1)).toEqual(["Previous page", "Close"]);
+    expect(answerKeys(p1, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
+
+    const diffBody = " 1 file changed, 1 insertion(+)\ndiff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n context\n+addition\n-deletion";
+    const p2 = parseInteractivePrompt("hermes", hermesStatusOutput(diffBody, false).replace("Status", "Diff"))!;
+    expect(p2.title).toBe("Diff");
+    expect(p2.body).toContain(" 1 file changed, 1 insertion(+)");
+    expect(p2.body).toContain("diff --git a/a.ts b/a.ts");
+    expect(p2.body).toContain("@@ -1 +1 @@");
+    expect(p2.body).toContain("\n context\n");
+    expect(p2.body).toContain("\n+addition\n");
+    expect(p2.body).toContain("\n-deletion");
+    expect(labels(p2)).toEqual(["Previous page", "Next page", "Close"]);
+
+    const p3 = parseInteractivePrompt("hermes", hermesStatusOutput("Review results:\n- Issue 1 fixed", true).replace("Status", "Review"))!;
+    expect(p3.title).toBe("Review");
+    expect(p3.body).toBe("Review results:\n- Issue 1 fixed");
+    expect(labels(p3)).toEqual(["Previous page", "Close"]);
+  });
+});
+
+function hermesClassicApproval(at = 0, command = "echo '...' > AGENTS.md", detail = "Write to protected agent-instruction files...approval always required", choices = ["Allow once", "Deny"], seconds = 240, spinner = "⠋", toolProgress?: string): string {
+  const content = ["⚠️  Dangerous Command", "", ...command.split("\n"), "", ...choices.map((label, index) => `${at === index ? "❯" : " "} ${index + 1}. ${label}`), "", ...detail.split("\n")];
+  const postModal = toolProgress !== undefined ? [`  ${toolProgress}`] : [];
+  return [`╭${"─".repeat(74)}╮`, ...content.map((line) => `│ ${line.padEnd(72)} │`), `╰${"─".repeat(74)}╯`, "", ...postModal, `  ↑/↓ to select, Enter to confirm  (${seconds}s)`, ` ⚕ smoke-model │ ctx -- │ [░░░░░░░░░░] -- │ 5s │ ${spinner} 0s`, "────────────────────────────────", "⚠ ❯", "────────────────────────────────"].join("\n");
+}
+
+function hermesTuiApproval(at = 0, command = "echo '...' > AGENTS.md", warning = "warning", choices = ["Allow once", "Deny"], spinner = "⠋"): string {
+  const content = [`⚠ Approval required · ${warning}`, ...command.split("\n"), "", ...choices.map((label, index) => `${at === index ? "▸" : " "} ${index + 1}. ${label}`), `↑/↓ select · Enter confirm · 1-${choices.length} quick pick · Esc/Ctrl+C deny`];
+  return [`╔${"═".repeat(98)}╗`, ...content.map((line) => `║ ${line.padEnd(96)} ║`), `╚${"═".repeat(98)}╝`, "", `─ ~/app │ smoke-model │ ${spinner} approval needed ─`].join("\n");
+}
+
+describe("Hermes native approval prompts", () => {
+  test("parses classic approval with command, warning and options", () => {
+    const screen = hermesClassicApproval();
+    const prompt = parseInteractivePrompt("hermes", screen)!;
+    expect(prompt.kind).toBe("approval");
+    expect(prompt.title).toBe("⚠️  Dangerous Command");
+    expect(prompt.body).toContain("echo '...' > AGENTS.md");
+    expect(prompt.body).toContain("Write to protected agent-instruction files...approval always required");
+    expect(labels(prompt)).toEqual(["Allow once", "Deny"]);
+
+    // navigation keys
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+
+    // navigation keys when cursor moved to Deny
+    const pAt1 = parseInteractivePrompt("hermes", hermesClassicApproval(1))!;
+    expect(answerKeys(pAt1, { option_index: 1 })).toEqual([{ keys: ["enter"] }]);
+  });
+
+  test("classic approval identity is unaffected by spinner or countdown changes but invalidates on changes to command, warning or options", () => {
+    const prompt = parseInteractivePrompt("hermes", hermesClassicApproval())!;
+
+    // spinner / timeout tick does not invalidate
+    const ticked = parseInteractivePrompt("hermes", hermesClassicApproval(0, undefined, undefined, undefined, 239, "⠙"))!;
+    expect(ticked.id).toBe(prompt.id);
+
+    // changed command invalidates
+    const otherCmd = parseInteractivePrompt("hermes", hermesClassicApproval(0, "echo '...' > OTHER.md"))!;
+    expect(otherCmd.id).not.toBe(prompt.id);
+
+    // changed warning invalidates
+    const otherWarning = parseInteractivePrompt("hermes", hermesClassicApproval(0, undefined, "Different warning text"))!;
+    expect(otherWarning.id).not.toBe(prompt.id);
+
+    // changed options invalidate
+    const otherOptions = parseInteractivePrompt("hermes", hermesClassicApproval(0, undefined, undefined, ["Allow once", "Allow for this session", "Deny"]))!;
+    expect(otherOptions.id).not.toBe(prompt.id);
+  });
+
+  test("parses Ink approval modal with title, warning, and stable identity across spinner ticks", () => {
+    const screen = hermesTuiApproval();
+    const prompt = parseInteractivePrompt("hermes", screen)!;
+    expect(prompt.kind).toBe("approval");
+    expect(prompt.title).toBe("⚠ Approval required · warning");
+    expect(prompt.body).toBe("echo '...' > AGENTS.md");
+    expect(labels(prompt)).toEqual(["Allow once", "Deny"]);
+
+    // navigation keys
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+
+
+    // spinner tick preserves id
+    const ticked = parseInteractivePrompt("hermes", hermesTuiApproval(0, undefined, undefined, undefined, "⠙"))!;
+    expect(ticked.id).toBe(prompt.id);
+
+    // changed command, warning or options invalidate
+    expect(parseInteractivePrompt("hermes", hermesTuiApproval(0, "echo '...' > OTHER.md"))!.id).not.toBe(prompt.id);
+    expect(parseInteractivePrompt("hermes", hermesTuiApproval(0, undefined, "other warning"))!.id).not.toBe(prompt.id);
+    expect(parseInteractivePrompt("hermes", hermesTuiApproval(0, undefined, undefined, ["Allow once", "Allow this session", "Deny"]))!.id).not.toBe(prompt.id);
+  });
+
+  test("rejects truncated approval text, stale trails and broken borders", () => {
+    expect(parseInteractivePrompt("hermes", hermesClassicApproval(0, "echo '...' > AGENTS.md\n… (command truncated)"))).toBeNull();
+    expect(parseInteractivePrompt("hermes", `${hermesClassicApproval()}\nDone.`)).toBeNull();
+    expect(parseInteractivePrompt("hermes", `${hermesTuiApproval()}\nDone.`)).toBeNull();
+  });
+
+  test("parses classic approval with native tool progress row and keeps stable ID across timer and spinner ticks", () => {
+    const progress = "✍️ /tmp/hermes-five-smoke-BJYKAj/fixture-repo/AGENTS.md  (52062s · ↓ 24 tok)";
+    const screen = hermesClassicApproval(0, "<write to AGENTS.md>", "Write to protected agent-instruction file(s): AGENTS.md. These files steer future agent behavior; approval is always required (not bypassed by auto-approve).", ["Allow once", "Deny"], 247, "⠋", progress);
+    const prompt = parseInteractivePrompt("hermes", screen)!;
+    expect(prompt.kind).toBe("approval");
+    expect(prompt.title).toBe("⚠️  Dangerous Command");
+    expect(prompt.body).toContain("<write to AGENTS.md>");
+    expect(labels(prompt)).toEqual(["Allow once", "Deny"]);
+
+    // Timer / token counter tick preserves approval ID
+    const tickedProgress = "✍️ /tmp/hermes-five-smoke-BJYKAj/fixture-repo/AGENTS.md  (52063s · ↓ 25 tok)";
+    const ticked = parseInteractivePrompt("hermes", hermesClassicApproval(0, "<write to AGENTS.md>", "Write to protected agent-instruction file(s): AGENTS.md. These files steer future agent behavior; approval is always required (not bypassed by auto-approve).", ["Allow once", "Deny"], 246, "⠙", tickedProgress))!;
+    expect(ticked.id).toBe(prompt.id);
+    for (const timer of ["( 17.1s · ↓ 24 tok)", "01m441s · ↓ 24 tok)"]) {
+      const repainted = parseInteractivePrompt("hermes", screen.replace("(52062s · ↓ 24 tok)", timer));
+      expect(repainted?.id).toBe(prompt.id);
+    }
+
+    // Changed target rejection: tool progress target mismatched from modal
+    const otherProgress = "✍️ /tmp/hermes-five-smoke-BJYKAj/fixture-repo/OTHER.md  (52062s · ↓ 24 tok)";
+    expect(parseInteractivePrompt("hermes", hermesClassicApproval(0, "<write to AGENTS.md>", "Write to protected agent-instruction file(s): AGENTS.md. These files steer future agent behavior; approval is always required (not bypassed by auto-approve).", ["Allow once", "Deny"], 247, "⠋", otherProgress))).toBeNull();
+
+    // Arbitrary conversation tail rejection
+    const arbitraryScreen = hermesClassicApproval(0, "<write to AGENTS.md>", "Write to protected agent-instruction file(s): AGENTS.md.", ["Allow once", "Deny"], 247, "⠋", "I am currently generating the instructions for you.");
+    expect(parseInteractivePrompt("hermes", arbitraryScreen)).toBeNull();
+  });
+
+  test("parses Ink approval modal with trailing native background ruling after border", () => {
+    const rawInkScreen = [
+      " ╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗",
+      " ║ ⚠ approval required · Write to protected agent-tistruction file(s): AGENTS.md. These files steer future agent     ║ ┃",
+      " ║ behavior; approval is always required (not bypassed by auto-approve).                                              ║",
+      " ║  <write to AGENTS.md>                                                                                              ║",
+      " ║ ▸ 1. Allow once                                                                                                    ║",
+      " ║   2. Deny                                                                                                          ║",
+      " ║ ↑/↓ select · Enter confirm · 1-2 quick pick · Esc/Ctrl+C deny                                                      ║",
+      " ╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝",
+      "",
+      "",
+      "",
+      " ─ (⌐■_■) contemplating… · 1m 11s │ test model │ 16/256k │ 3m 27s           ─  Hermes deterministic assistant response",
+    ].join("\n");
+    const prompt = parseInteractivePrompt("hermes", rawInkScreen)!;
+    expect(prompt.kind).toBe("approval");
+    expect(prompt.body).toContain("<write to AGENTS.md>");
+    expect(prompt.body).toContain("behavior; approval is always required (not bypassed by auto-approve).");
+    expect(labels(prompt)).toEqual(["Allow once", "Deny"]);
+    const repainted = parseInteractivePrompt("hermes", rawInkScreen.replace("⚠ approval required", "⚠ Mpprdval required"))!;
+    expect(repainted.kind).toBe("approval");
+    expect(labels(repainted)).toEqual(["Allow once", "Deny"]);
   });
 });
 
@@ -3079,6 +3336,32 @@ describe("an answer and the menu it was made for", () => {
     });
   });
 
+  test("leaves unchanged Hermes pager actionable after navigation and closes with escape", async () => {
+    const diffScreen = hermesStatusOutput("diff --git a/file b/file\n+change", true).replace("Status", "Diff");
+    await withPane("hermes", "idle", diffScreen, async pane => {
+      const first = (await card())!;
+      expect(labels(first)).toEqual(["Previous page", "Close"]);
+      pane.onSent = key => { if (key === "esc") pane.screen = "─ ready\n❯"; };
+
+      // Navigating at boundary leaves native pager screen unchanged
+      expect((await answer(first.id, { option_index: 0 })).status).toBe(200);
+      expect(pane.sent).toEqual(["pageup"]);
+      expect((await answer(first.id, { option_index: 1 })).status).toBe(409);
+
+      // Pager card remains actionable on unchanged screen
+      const current = (await card())!;
+      expect(current).not.toBeNull();
+      expect(current.id).not.toBe(first.id);
+      expect(labels(current)).toEqual(["Previous page", "Close"]);
+
+      // Subsequent close sends Escape and dismisses pager
+      pane.sent = [];
+      expect((await answer(current.id, { option_index: 1 })).status).toBe(200);
+      expect(pane.sent).toEqual(["esc"]);
+      expect(await card()).toBeNull();
+    });
+  });
+
   test("sends no Hermes pager key after another prompt replaces it", async () => {
     await withPane("hermes", "idle", hermesStatusOutput(), async pane => {
       const first = (await card())!;
@@ -3124,6 +3407,67 @@ describe("an answer and the menu it was made for", () => {
       expect((await answer(next.id, { option_index: 0 })).status).toBe(200);
       expect(pane.sent).toEqual([]);
       expect(await card()).toBeNull();
+    });
+  });
+
+  test("waits for Hermes approval cursor settlement and handles allow and deny keys", async () => {
+    await withPane("hermes", "blocked", hermesClassicApproval(0), async pane => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      expect(shown.kind).toBe("approval");
+      expect(labels(shown)).toEqual(["Allow once", "Deny"]);
+
+      // Deny: sends down, waits for cursor settle at row 1, then sends enter
+      pane.onSent = key => {
+        if (key === "down") {
+          pane.screen = hermesClassicApproval(1, undefined, undefined, undefined, 239, "⠙");
+        }
+      };
+      expect((await answer(shown.id, { option_index: 1 })).status).toBe(200);
+      expect(pane.sent).toEqual(["down", "enter"]);
+      // Lingering screen after commit is withheld by hermesAnswered without generic fallback
+      expect(await card()).toBeNull();
+
+      // A different new approval remains actionable
+      pane.screen = hermesClassicApproval(0, "echo '...' > OTHER.md");
+      const next = (await card())!;
+      expect(next.kind).toBe("approval");
+      expect(next.body).toContain("OTHER.md");
+      pane.sent = [];
+      expect((await answer(next.id, { option_index: 0 })).status).toBe(200);
+      expect(pane.sent).toEqual(["enter"]);
+      expect(await card()).toBeNull();
+
+      // Once native modal actually disappears, new identical asking remains answerable
+      pane.screen = "hermes> done\n";
+      await card();
+      pane.screen = hermesClassicApproval(0);
+      const reasked = (await card())!;
+      expect(reasked.kind).toBe("approval");
+      pane.sent = [];
+      expect((await answer(reasked.id, { option_index: 0 })).status).toBe(200);
+      expect(pane.sent).toEqual(["enter"]);
+    });
+
+    // Allow once: sends enter directly without moving
+    await withPane("hermes", "blocked", hermesClassicApproval(0), async pane => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      expect((await answer(shown.id, { option_index: 0 })).status).toBe(200);
+      expect(pane.sent).toEqual(["enter"]);
+      expect(await card()).toBeNull();
+    });
+
+    // Stale target rejection: if prompt changes before cursor settles
+    await withPane("hermes", "blocked", hermesClassicApproval(0), async pane => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      pane.onSent = key => {
+        if (key === "down") {
+          pane.screen = hermesClassicApproval(1, "echo '...' > OTHER.md");
+        }
+      };
+      expect((await answer(shown.id, { option_index: 1 })).status).toBe(409);
     });
   });
 
