@@ -599,6 +599,7 @@ export const KO: Record<string, string> = {
   "Not sent: Claude Code's input box in the terminal is not empty. Send or clear it there, then send this message.": "보내지 않음: 터미널의 Claude Code 입력란이 비어 있지 않습니다. 그곳에서 보내거나 지운 뒤 이 메시지를 보내세요.",
   "Not sent: Claude Code's input box in the terminal already holds “{draft}”.": "보내지 않음: 터미널의 Claude Code 입력란에 이미 입력된 내용이 있습니다(“{draft}”).",
   "Clear it and send": "지우고 보내기",
+  "Not sent: Hermes' terminal input is not known to be empty. Send or clear it there, then send this message.": "보내지 않음: 터미널의 Hermes 입력란이 비어 있는지 확인할 수 없습니다. 그곳에서 보내거나 지운 뒤 이 메시지를 보내세요.",
   "Not sent: it waited too long behind an earlier message, and nothing was typed. Send it again.": "보내지 않음: 앞선 메시지 뒤에서 너무 오래 기다렸고 아무것도 입력되지 않았습니다. 다시 보내세요.",
   "Not confirmed: the pane did not confirm this message. Check the terminal before sending it again.": "확인되지 않음: 패널이 이 메시지를 확인하지 않았습니다. 다시 보내기 전에 터미널을 확인하세요.",
   "Not sent: {message}": "보내지 않음: {message}",

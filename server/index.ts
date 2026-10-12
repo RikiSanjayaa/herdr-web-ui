@@ -47,6 +47,7 @@ import {
   integrationList,
   layoutSetSplitRatio,
   paneClear,
+  herdrRpc,
   paneClose,
   paneFocus,
   paneGet,
@@ -95,6 +96,8 @@ import { attachableIdentity, sidecarAvailable } from "./pty/sidecar.ts";
 import { MirrorSession } from "./mirror.ts";
 import { mirrorInput } from "./mirror-input.ts";
 import { PendingInputs, PendingInputError, type PendingIdentity, type PendingRecord } from "./pending-input.ts";
+import { hermesClassicPasteMatches, hermesInputState, hermesSameInput, hermesViewportShowsLive } from "./hermes-input.ts";
+import { defaultHermesHome, isHermesProcess, processHermesHome } from "./hermes.ts";
 import { PendingRequestBook } from "./pending-requests.ts";
 import { interruptCodexSteering } from "./codex-steering.ts";
 import { OutputWindow, OUTPUT_HIGH_BYTES, OUTPUT_HARD_BYTES, OUTPUT_STALL_MS, ReplayBuffer } from "./output-window.ts";
@@ -196,6 +199,7 @@ const MAX_WAITING_KEYS = 256;
  */
 export const SUBMIT_DEADLINE_MS = 45_000;
 const CLAUDE_INPUT_DRAFT_MESSAGE = "Claude Code's input box is not empty (a draft, bash mode, or a box that could not be read); send or clear it in the terminal, then send this message";
+const HERMES_INPUT_DRAFT_MESSAGE = "Hermes' terminal input is not known to be empty (a draft or an unreadable input box); send or clear it in the terminal, then send this message";
 /** How long a cleared Claude input box may take to read empty before the send is refused after all. */
 const DRAFT_CLEAR_WAIT_MS = 1_500;
 const DRAFT_CLEAR_POLL_MS = 50;
@@ -588,7 +592,7 @@ export function createServer(
    * reads empty.
    */
   async function submitText(paneId: string, text: string, payload: string, arrivedAt: number, fromTerminal = false, authorize: () => void = () => {},
-    clearDraft?: string, confirmation?: { draft: string; identity: PendingIdentity }): Promise<void> {
+    clearDraft?: string, confirmation?: { draft: string; identity: PendingIdentity }, authorizeHermes: () => void = authorize): Promise<void> {
     let clearedDraft = false;
     const inTime = (reserve = 0): void => {
       authorize();
@@ -615,6 +619,38 @@ export function createServer(
           && current.terminalId === confirmation.identity.terminalId && current.session === confirmation.identity.session;
         if (clearDraft !== undefined && !sameClaude(identity)) {
           throw new HerdrError("pending_target_changed", "The named draft's Claude terminal or session changed; nothing was cleared or sent");
+        }
+        if ((pane?.agent ?? pane?.agent_session?.agent) === "hermes") {
+          if (pane?.agent_status === "blocked") throw new HerdrError("agent_blocked", "The agent is waiting for an answer in the terminal");
+          if (!pane || !["working", "idle", "done"].includes(pane.agent_status)) throw new HerdrError("agent_not_ready", "The agent's current input state is not known");
+          authorizeHermes();
+          await guardHermesInput(paneId);
+          inTime();
+          authorizeHermes();
+          const expectedIdentity = pendingIdentity(pane);
+          const allowed = (): boolean => { try { authorizeHermes(); return true; } catch { return false; } };
+          let pasted = false;
+          try {
+            await paneSendText(paneId, `\u001b[200~${closeMention(text)}\u001b[201~`, undefined, allowed);
+            pasted = true;
+            await Bun.sleep(options.submitDelayMs ?? SUBMIT_DELAY_MS);
+            authorizeHermes();
+            const currentPane = await paneGet(paneId);
+            const current = pendingIdentity(currentPane);
+            if (current.agent !== expectedIdentity.agent || current.terminalId !== expectedIdentity.terminalId || current.session !== expectedIdentity.session) {
+              throw new HerdrError("pending_target_changed", "The pane's terminal or agent session changed");
+            }
+            if (currentPane.agent_status === "blocked") throw new HerdrError("agent_blocked", "The agent is waiting for an answer in the terminal");
+            if (!["working", "idle", "done"].includes(currentPane.agent_status)) throw new HerdrError("agent_not_ready", "The agent's current input state is not known");
+            await guardHermesInput(paneId, closeMention(text));
+            authorizeHermes();
+            await paneSendKeys(paneId, ["Enter"], undefined, allowed);
+            noteSubmitted(paneId, text);
+            return;
+          } catch (error) {
+            if (!pasted && error instanceof HerdrError && error.code === "cancelled") throw error;
+            throw new HerdrError("submit_changed", "Message delivery could not be confirmed. Check the terminal before sending again.");
+          }
         }
         if ((pane?.agent ?? pane?.agent_session?.agent) === "claude") {
           if (clearDraft === undefined) {
@@ -853,6 +889,43 @@ export function createServer(
     await Bun.sleep(RESTORED_CLEAR_SETTLE_MS);
     if (claudeInputDraft(...await claudeBoxReads(paneId))) throw new HerdrError("input_draft", CLAUDE_INPUT_DRAFT_MESSAGE);
   }
+  async function guardHermesInput(paneId: string, expected?: string): Promise<void> {
+    const initial = await paneRead({ paneId, source: "detection", format: "text" });
+    if (initial.truncated) throw new HerdrError("hermes_input_draft", HERMES_INPUT_DRAFT_MESSAGE);
+    const before = initial.text;
+    let live = before;
+    let colors: string | null = null;
+    if (hermesInputState(before, null, expected) === "draft") {
+      const scrollBefore = await paneScrollInfo(paneId);
+      const viewport = await paneRead({ paneId, source: "visible", format: "ansi" });
+      const ansi = viewport.text;
+      const scrollAfter = await paneScrollInfo(paneId);
+      const latest = await paneRead({ paneId, source: "detection", format: "text" });
+      if (latest.truncated) throw new HerdrError("hermes_input_draft", HERMES_INPUT_DRAFT_MESSAGE);
+      live = latest.text;
+      if (!viewport.truncated && hermesViewportShowsLive(scrollBefore, scrollAfter, ansi, before, live)) colors = ansi;
+    }
+    if (parseInteractivePrompt("hermes", live, null, true) || secretPrompt(live) !== null || hermesInputState(live, colors, expected) === "blocked") {
+      throw new HerdrError("agent_blocked", "The agent is waiting for an answer in the terminal");
+    }
+    const state = hermesInputState(live, colors, expected);
+    if (state === "empty") return;
+    if (state === "draft" && expected !== undefined && live.includes("[Pasted text #")) {
+      let home = options.hermesHome;
+      if (home === undefined) {
+        const info = await herdrRpc<{ process_info?: { foreground_processes?: { pid: number; name?: string; argv0?: string; argv?: string[] }[] } }>("pane.process_info", { pane_id: paneId });
+        const process = info.process_info?.foreground_processes?.find(isHermesProcess);
+        if (!process) throw new HerdrError("hermes_input_draft", HERMES_INPUT_DRAFT_MESSAGE);
+        home = await processHermesHome(process.pid, process.argv ?? []) ?? defaultHermesHome();
+      }
+      if (await hermesClassicPasteMatches(live, expected, home)) {
+        const latest = await paneRead({ paneId, source: "detection", format: "text" });
+        if (!latest.truncated && hermesSameInput(live, latest.text)) return;
+      }
+    }
+    throw new HerdrError("hermes_input_draft", HERMES_INPUT_DRAFT_MESSAGE);
+  }
+
 
   async function dispatchPendingText(owner: Client, paneId: string, text: string, lease: PendingLease, identity: PendingIdentity,
     automatic: boolean, arrivedAt: number, committing: (working: boolean, restarting?: boolean) => void = () => {}, interruptWorkingCodex = false): Promise<SubmitReply> {
@@ -872,6 +945,7 @@ export function createServer(
       // The box is the live screen's; only the viewport read tells Claude's grey text from a draft. The live
       // read comes after the colors, so text typed between the two is in the box and holds the message.
       if (context.identity.agent === "claude") await freeClaudeBox(paneId, context.working, () => authorizePending(owner, paneId, lease), arrivedAt + (options.submitDeadlineMs ?? SUBMIT_DEADLINE_MS));
+      if (context.identity.agent === "hermes") await guardHermesInput(paneId);
       if (Date.now() - arrivedAt > (options.submitDeadlineMs ?? SUBMIT_DEADLINE_MS)) throw new HerdrError("submit_timeout", "The pending message waited too long; nothing was typed");
       authorizePending(owner, paneId, lease);
       // asked again right before herdr is written to: its connect is awaited (#666)
@@ -889,6 +963,7 @@ export function createServer(
       await Bun.sleep(options.submitDelayMs ?? SUBMIT_DELAY_MS);
       const beforeEnter = await pendingContext(owner, paneId, lease, identity, true);
       if (automatic && beforeEnter.working) throw new HerdrError("pending_wait", "The agent started another turn before this queued message could be committed");
+      if (beforeEnter.identity.agent === "hermes") await guardHermesInput(paneId, closeMention(text));
       authorizePending(owner, paneId, lease);
       const steering = !automatic && beforeEnter.working;
       committing(steering);
@@ -3159,7 +3234,10 @@ export function createServer(
                   // held while this waited its turn (the attach was refused after the check above)
                   if (attachments.get(message.pane_id)?.held) throw new HerdrError("attach_held", ATTACH_HELD_MESSAGE);
                   return submitText(message.pane_id, message.text, message.payload, arrivedAt, message.typed === true, () => authorizeSocket(client), message.clear_draft,
-                    draftConfirmations.get(client)?.get(message.pane_id));
+                    draftConfirmations.get(client)?.get(message.pane_id), () => {
+                      if (!clients.has(client) || client.data.closing) throw new HerdrError("disconnected", "The message's connection closed");
+                      authorizeSocket(client);
+                    });
                 });
                 if (message.clear_draft !== undefined) draftConfirmations.get(client)?.delete(message.pane_id);
                 result(true);

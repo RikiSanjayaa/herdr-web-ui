@@ -32,6 +32,8 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   token set and no device paired, and what to do about it. Nothing about who is let in changes:
   pairing a device or setting a token is still the owner's call.
   ([#698](https://github.com/devswha/herdr-web-ui/pull/698) by @pt-act)
+- Hermes Chat sends preserve terminal drafts and recheck input before Enter. Changed
+  prompts or disconnected senders cancel submission; uncertain delivery never retries.
 - **Shared settings and pins.** The browsers of one server, a PC's and a phone's, keep the same
   pinned agents and the same settings that do not depend on the device: theme and colors, language,
   the sidebar's rows, order, cards and pins, chat and usage-meter choices. A

@@ -601,6 +601,7 @@ export const JA: Record<string, string> = {
   "Not sent: Claude Code's input box in the terminal is not empty. Send or clear it there, then send this message.": "未送信: ターミナルの Claude Code の入力欄が空ではありません。そこで送信するか消してから、このメッセージを送ってください。",
   "Not sent: Claude Code's input box in the terminal already holds “{draft}”.": "未送信: ターミナルの Claude Code の入力欄にすでに「{draft}」が入力されています。",
   "Clear it and send": "消して送信",
+  "Not sent: Hermes' terminal input is not known to be empty. Send or clear it there, then send this message.": "未送信: ターミナルの Hermes の入力欄が空か確認できません。そこで送信するか消してから、このメッセージを送ってください。",
   "Not sent: it waited too long behind an earlier message, and nothing was typed. Send it again.": "未送信: 前のメッセージの後で長く待ちすぎたため、何も入力されませんでした。もう一度送信してください。",
   "Not confirmed: the pane did not confirm this message. Check the terminal before sending it again.": "未確認: ペインがこのメッセージを確認しませんでした。再送信する前にターミナルを確認してください。",
   "Not sent: {message}": "未送信: {message}",

@@ -567,6 +567,7 @@ export const TR: Record<string, string> = {
   "Not sent: the agent is waiting for an answer in the terminal. Answer it first.": "Gönderilmedi: ajan terminalde bir yanıt bekliyor. Önce onu yanıtlayın.",
   "Not sent: this view only watches the pane.": "Gönderilmedi: bu görünüm paneli yalnızca izler.",
   "Not sent: Claude Code's input box in the terminal is not empty. Send or clear it there, then send this message.": "Gönderilmedi: terminaldeki Claude Code girdi kutusu boş değil. Orada gönderin veya temizleyin, sonra bu mesajı gönderin.",
+  "Not sent: Hermes' terminal input is not known to be empty. Send or clear it there, then send this message.": "Gönderilmedi: terminaldeki Hermes girdisinin boş olduğu doğrulanamıyor. Orada gönderin veya temizleyin, sonra bu mesajı gönderin.",
   "Not sent: Claude Code's input box in the terminal already holds “{draft}”.": "Gönderilmedi: terminaldeki Claude Code girdi kutusunda zaten “{draft}” var.",
   "Clear it and send": "Temizle ve gönder",
   "Not sent: it waited too long behind an earlier message, and nothing was typed. Send it again.": "Gönderilmedi: önceki bir mesajın arkasında çok bekledi ve hiçbir şey yazılmadı. Yeniden gönderin.",

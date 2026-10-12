@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { createServer } from "./index.ts";
 import * as herdrClient from "./herdr/client.ts";
 import { herdrRpc, paneRead, paneScrollInfo, sessionSnapshot } from "./herdr/client.ts";
@@ -37,6 +38,9 @@ function holdConnect(rpc: "text" | "keys"): { reached: Promise<void>; release: (
 }
 const approval = "Would you like to run the following command?\n\n$ rm -rf junk\n\n› 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n\nPress enter to confirm or esc to cancel\n";
 const codexSteering = (entry = "send this now") => `• Working (2s • esc to interrupt)\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${entry}\n› Ask Codex to do anything\n  gpt-6.1 default · /workspace\n`;
+const hermesRule = "─".repeat(60);
+const hermesScreen = (input = "❯") => `${hermesRule}\n${input}\n${hermesRule}\n`;
+const hermesMenu = hermesScreen("⚠ ❯ type 1/2/3, or use ↑/↓ then Enter");
 
 class Socket {
   readonly seen: any[] = [];
@@ -69,8 +73,9 @@ class Socket {
 beforeAll(() => {
   // The recorder polls its screen file: fs.watch can drop the change that follows writeFileSync's
   // truncation, leaving the cleared screen it read in between up for good.
-  writeFileSync(join(root, "record.cjs"), `const fs=require("node:fs");const out=process.argv[2];process.stdin.setRawMode(true);process.stdin.resume();process.stdout.write("\\x1b[?2004h"+(process.argv[3]||"").replace(/\\\\x1b/g,"\\x1b"),()=>fs.writeFileSync(out,""));process.stdin.on("data",c=>fs.appendFileSync(out,JSON.stringify(c.toString("utf8"))+"\\n"));let shown="";setInterval(()=>{const next=fs.readFileSync(process.argv[4],"utf8");if(next!==shown){shown=next;process.stdout.write("\\x1b[2J\\x1b[H"+next);}},20);`);
-  for (const name of ["claude", "codex", "plain"]) { copyFileSync(process.execPath, join(root, name)); chmodSync(join(root, name), 0o755); }
+  // This external recorder and herdr run in other processes; Bun's fake timers cannot drive their repaint polling.
+  writeFileSync(join(root, "record.cjs"), `const fs=require("node:fs");const out=process.argv[2];process.stdin.setRawMode(true);process.stdin.resume();const screen=process.argv[5]==="base64-screen"?"\\x1b[2J\\x1b[H"+Buffer.from(process.argv[3],"base64").toString("utf8"):(process.argv[3]||"").replace(/\\\\x1b/g,"\\x1b");process.stdout.write("\\x1b[?2004h"+screen,()=>fs.writeFileSync(out,""));process.stdin.on("data",c=>fs.appendFileSync(out,JSON.stringify(c.toString("utf8"))+"\\n"));let shown="";setInterval(()=>{const next=fs.readFileSync(process.argv[4],"utf8");if(next!==shown){shown=next;process.stdout.write("\\x1b[2J\\x1b[H"+next);}},20);`);
+  for (const name of ["claude", "codex", "hermes", "plain"]) { copyFileSync(process.execPath, join(root, name)); chmodSync(join(root, name), 0o755); }
 });
 afterEach(async () => {
   for (const item of active.splice(0)) { for (const socket of item.sockets) socket.close(); item.stop(); await herdrRpc("workspace.close", { workspace_id: item.workspace }).catch(() => undefined); }
@@ -86,9 +91,19 @@ async function setup(label: string, agent = "claude", screen = "› Message\n", 
   const log = join(root, `${id}.jsonl`);
   const screenFile = join(root, `${id}.screen`);
   writeFileSync(screenFile, "");
-  await herdrRpc("pane.send_text", { pane_id: pane, text: `exec '${join(root, agent)}' '${join(root, "record.cjs")}' '${log}' '${screen.replace(/\n/g, "\r\n")}' '${screenFile}'\n` });
+  const rendered = screen.replace(/\n/g, "\r\n");
+  const encoded = agent === "hermes";
+  await herdrRpc("pane.send_text", { pane_id: pane, text: `exec '${join(root, agent)}' '${join(root, "record.cjs")}' '${log}' '${encoded ? Buffer.from(rendered).toString("base64") : rendered}' '${screenFile}'${encoded ? " base64-screen" : ""}\n` });
   const deadline = Date.now() + 10_000;
   while (!existsSync(log)) { if (Date.now() > deadline) throw new Error("recorder did not start"); await Bun.sleep(25); }
+  if (encoded) {
+    const tail = stripVTControlCharacters(screen).trimEnd().split(/\r?\n/).at(-1)!.trimEnd();
+    // The external herdr process owns rendering; await its screen, not a guessed settling delay.
+    while (!(await paneRead({ paneId: pane, source: "detection", format: "text" })).text.trimEnd().endsWith(tail)) {
+      if (Date.now() > deadline) throw new Error("Hermes recorder screen did not render");
+      await Bun.sleep(25);
+    }
+  }
   // "plain" is a program herdr knows as no agent
   if (agent !== "plain") await herdrRpc("pane.report_agent", { pane_id: pane, source: "manual", agent, state: "working" });
   const server = createServer({ ...options, port: 0, stateDir: join(root, `state-${id}`) });
@@ -110,9 +125,11 @@ async function setup(label: string, agent = "claude", screen = "› Message\n", 
   const showScreen = async (text: string, ending = text) => {
     const drawn = async () => (await paneRead({ paneId: pane, source: "visible", format: "ansi" })).text;
     const before = await drawn();
-    writeFileSync(screenFile, text);
+    writeFileSync(screenFile, encoded ? text.replace(/\r?\n/g, "\r\n") : text);
     const deadline = Date.now() + 5_000;
-    while (await drawn() === before || !(await paneRead({ paneId: pane, source: "visible", format: "text" })).text.trimEnd().endsWith(ending.trimEnd())) {
+    while (await drawn() === before || !(encoded
+      ? (await paneRead({ paneId: pane, source: "visible", format: "text" })).text.replace(/\s/g, "").endsWith(ending.replace(/\s/g, ""))
+      : (await paneRead({ paneId: pane, source: "visible", format: "text" })).text.trimEnd().endsWith(ending.trimEnd()))) {
       if (Date.now() >= deadline) throw new Error("recorder screen did not update");
       await Bun.sleep(25);
     }
@@ -201,6 +218,96 @@ describe("connection-owned pending input", () => {
     await f.waitBytes("\r"); f.socket.send({ type: "detach", pane_id: f.pane });
     expect(await f.socket.action(10)).toMatchObject({ ok: false, code: "submit_changed" });
     expect(f.bytes()).toBe(`${paste("send this now")}\r`);
+  }, 30_000);
+
+  it("holds a pending Hermes message over a terminal draft and never retries it on later status changes", async () => {
+    const f = await setup("hermes-draft", "hermes", hermesScreen());
+    const message = await f.queue(1, "queued message");
+    await f.showScreen(hermesScreen(`❯ native terminal draft\n${hermesRule}\n❯`));
+    await f.state("idle");
+    const held = await f.socket.wait((frame) => frame.type === "pending-messages" && frame.pane_id === f.pane
+      && frame.messages.some((item: PendingMessage) => item.id === message.id && item.state === "held"));
+    expect(held.messages.find((item: PendingMessage) => item.id === message.id).error.code).toBe("hermes_input_draft");
+    expect(f.bytes()).toBe("");
+    expect((await paneRead({ paneId: f.pane, source: "detection", format: "text" })).text).toContain("❯ native terminal draft");
+    await f.showScreen(hermesScreen());
+    await f.state("working"); await f.state("idle");
+    f.socket.send({ type: "submit", id: 20, pane_id: f.pane, text: "barrier", payload: "barrier", typed: true });
+    expect(await f.socket.result(20)).toMatchObject({ ok: true }); await f.waitBytes("barrier\r");
+    expect(f.bytes()).toBe("barrier\r");
+    f.socket.send({ type: "pending-action", id: 21, pane_id: f.pane, pending_id: message.id, action: "steer" });
+    expect(await f.socket.action(21)).toMatchObject({ ok: true }); await f.waitBytes(`${paste("queued message")}\r`);
+  }, 30_000);
+
+  it("delivers clean Hermes pending input automatically and permits explicit Send now while working", async () => {
+    const f = await setup("hermes-clean", "hermes", hermesScreen());
+    const first = await f.queue(1, "next turn");
+    await f.state("idle"); await f.removed(first.id); await f.waitBytes("\r");
+    expect(f.bytes()).toBe(`${paste("next turn")}\r`);
+    await f.state("working");
+    const second = await f.queue(2, "send now");
+    f.socket.send({ type: "pending-action", id: 10, pane_id: f.pane, pending_id: second.id, action: "steer" });
+    expect(await f.socket.action(10)).toMatchObject({ ok: true }); await f.waitBytes(`${paste("send now")}\r`);
+    expect(f.bytes()).toBe(`${paste("next turn")}\r${paste("send now")}\r`);
+  }, 30_000);
+
+  it("commits a pending multiline Hermes paste after native folding, without accepting extra terminal text", async () => {
+    const text = "a\nb\nc\nd\ne\nf";
+    const f = await setup("hermes-folded", "hermes", hermesScreen(), { submitDelayMs: 1_500, hermesHome: root });
+    const message = await f.queue(1, text);
+    f.socket.send({ type: "pending-action", id: 10, pane_id: f.pane, pending_id: message.id, action: "steer" });
+    await f.waitBytes(paste(text));
+    mkdirSync(join(root, "pastes"), { recursive: true });
+    const path = join(root, "pastes", "paste_1_123456.txt"); writeFileSync(path, text);
+    await f.showScreen(hermesScreen(`❯ [Pasted text #1: 6 lines → ${path}]`));
+    expect(await f.socket.action(10)).toMatchObject({ ok: true }); await f.waitBytes(`${paste(text)}\r`);
+    expect(f.bytes()).toBe(`${paste(text)}\r`);
+    await f.showScreen(hermesScreen());
+    const second = await f.queue(2, text);
+    f.socket.send({ type: "pending-action", id: 11, pane_id: f.pane, pending_id: second.id, action: "steer" });
+    await f.waitBytes(`${paste(text)}\r${paste(text)}`); writeFileSync(path, text);
+    await f.showScreen(hermesScreen(`❯ [Pasted text #1: 6 lines → ${path}] extra terminal draft`));
+    expect(await f.socket.action(11)).toMatchObject({ ok: false, code: "submit_changed" });
+    expect(f.bytes()).toBe(`${paste(text)}\r${paste(text)}`);
+  }, 30_000);
+
+  it("withholds pending Hermes Enter when a dialog replaces the input after paste, without automatic retry", async () => {
+    const f = await setup("hermes-collision", "hermes", hermesScreen(), { submitDelayMs: 1_500 });
+    const message = await f.queue(1, "never commit");
+    f.socket.send({ type: "pending-action", id: 10, pane_id: f.pane, pending_id: message.id, action: "steer" });
+    await f.waitBytes(paste("never commit")); await f.showScreen(hermesMenu);
+    expect(await f.socket.action(10)).toMatchObject({ ok: false, code: "submit_changed" });
+    expect(f.bytes()).toBe(paste("never commit"));
+    await f.showScreen(hermesScreen()); await f.state("idle");
+    f.socket.send({ type: "submit", id: 20, pane_id: f.pane, text: "barrier", payload: "barrier", typed: true });
+    expect(await f.socket.result(20)).toMatchObject({ ok: true }); await f.waitBytes("barrier\r");
+    expect(f.bytes()).toBe(`${paste("never commit")}barrier\r`);
+  }, 30_000);
+
+  it("fails safe on unreadable pending Hermes input and cancels disconnected delivery permanently", async () => {
+    const f = await setup("hermes-unknown", "hermes", hermesScreen());
+    const message = await f.queue(1, "never replay"); const keeper = await f.another();
+    await f.showScreen("unreadable input\n");
+    f.socket.send({ type: "pending-action", id: 10, pane_id: f.pane, pending_id: message.id, action: "steer" });
+    expect(await f.socket.action(10)).toMatchObject({ ok: false, code: "hermes_input_draft" }); expect(f.bytes()).toBe("");
+    await f.socket.disconnect(); await f.showScreen(hermesScreen()); await f.state("idle", keeper);
+    keeper.send({ type: "submit", id: 20, pane_id: f.pane, text: "barrier", payload: "barrier", typed: true });
+    expect(await keeper.result(20)).toMatchObject({ ok: true }); await f.waitBytes("barrier\r"); expect(f.bytes()).toBe("barrier\r");
+    keeper.send({ type: "pending-action", id: 21, pane_id: f.pane, pending_id: message.id, action: "steer" });
+    expect(await keeper.action(21)).toMatchObject({ ok: false, code: "pending_not_found" });
+  }, 30_000);
+
+  it("cancels Hermes pending Enter on disconnect after paste and never revives it for another sender", async () => {
+    const f = await setup("hermes-partial", "hermes", hermesScreen(), { submitDelayMs: 750 });
+    const keeper = await f.another(); const message = await f.queue(1, "partial");
+    f.socket.send({ type: "pending-action", id: 10, pane_id: f.pane, pending_id: message.id, action: "steer" });
+    await f.waitBytes(paste("partial")); await f.socket.disconnect();
+    await f.state("idle", keeper);
+    keeper.send({ type: "submit", id: 20, pane_id: f.pane, text: "barrier", payload: "barrier", typed: true });
+    expect(await keeper.result(20)).toMatchObject({ ok: true }); await f.waitBytes("barrier\r");
+    expect(f.bytes()).toBe(`${paste("partial")}barrier\r`);
+    keeper.send({ type: "pending-action", id: 21, pane_id: f.pane, pending_id: message.id, action: "steer" });
+    expect(await keeper.action(21)).toMatchObject({ ok: false, code: "pending_not_found" });
   }, 30_000);
 
   it("queues any working agent and advances one message per confirmed turn", async () => {

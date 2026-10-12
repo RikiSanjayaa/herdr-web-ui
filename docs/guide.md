@@ -156,6 +156,12 @@ Every agent herdr runs shows up with its live status, terminal and alerts. The c
 | **Antigravity (agy)** | **Experimental; macOS untested.** Native ledger, selected by the running process’s held conversation lock. Linux native-tested; Windows uses terminal text. See [Agy behavior and limits](agy-chat.md). | — use Terminal |
 | **Anything else** | The terminal's text | — use Terminal |
 
+Hermes Chat sends only when its terminal input is known to be empty. A terminal draft,
+shell mode, an unreadable input box or an active dialog keeps the message from being
+typed; the Chat draft stays available. Before submitting a pasted message, the bridge
+checks the live input again. A changed dialog or disconnected sender cancels Enter,
+and an uncertain delivery is never retried automatically.
+
 Devin sessions are never selected by directory or recency alone. A plain `devin` shows the
 terminal text, since herdr does not report its session without its Devin integration; a session
 started with `devin --resume <id>` (or `-r <id>`, as Devin suggests when it exits) is a chat.

@@ -603,6 +603,7 @@ export const ZH: Record<string, string> = {
   "Not sent: Claude Code's input box in the terminal is not empty. Send or clear it there, then send this message.": "未发送：终端中 Claude Code 的输入框不是空的。请先在那里发送或清除，再发送这条消息。",
   "Not sent: Claude Code's input box in the terminal already holds “{draft}”.": "未发送：终端中 Claude Code 的输入框里已有“{draft}”。",
   "Clear it and send": "清除并发送",
+  "Not sent: Hermes' terminal input is not known to be empty. Send or clear it there, then send this message.": "未发送：无法确认终端中 Hermes 的输入框是否为空。请先在那里发送或清除，再发送这条消息。",
   "Not sent: it waited too long behind an earlier message, and nothing was typed. Send it again.": "未发送：在前一条消息之后等待过久，且未输入任何内容。请重新发送。",
   "Not confirmed: the pane did not confirm this message. Check the terminal before sending it again.": "未确认：窗格未确认此消息。重新发送前请检查终端。",
   "Not sent: {message}": "未发送：{message}",
