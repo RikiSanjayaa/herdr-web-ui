@@ -158,7 +158,7 @@ Every agent herdr runs shows up with its live status, terminal and alerts. The c
 
 Hermes command suggestions include `/retry` and eligible individual skills from the selected
 native process's profile. Resolved panes also offer `/help`, `/status`, `/reload-skills`, `/version`,
-`/profile`, `/diff`, `/plan`, `/review` and `/init`. `/help` shows
+`/profile`, `/plan`, `/review` and `/init`. `/help` shows
 the visible native help output; **Dismiss** hides the card without typing into the terminal.
 Use Terminal to scroll the full help. Classic CLI `/status` is a read-only card with **Dismiss**.
 Ink `/status` shows the native pager's current page with **Previous page**, **Next page**
@@ -169,9 +169,9 @@ After a successful reload, Chat refreshes command suggestions for that pane and 
 reload. Added and removed skills appear in the native result; failed reloads do not refresh suggestions.
 `/version` shows the native version and installation diagnostics, including any native update-status
 message. Classic CLI uses **Dismiss**; Ink uses its native pager controls. It does not install updates.
-`/profile` shows the selected native profile and home. `/diff` preserves native arguments, including
-`staged`, `all`, `session`, `--stat` and file paths. Both use classic **Dismiss** or Ink pager controls;
-diff indentation and patch text are preserved. These cards show terminal output, not stored turns.
+`/profile` shows the selected native profile and home, with classic **Dismiss** or Ink pager controls.
+These cards show terminal output, not stored turns. `/diff` remains outside Chat suggestions and
+dedicated result cards; use `git diff` in Terminal instead.
 `/plan [task]` asks Hermes to write its plan under the active workspace's `.hermes/plans/` directory.
 `/init [notes]` asks Hermes to create or update that workspace's `AGENTS.md`; recognized native
 approval cards retain the warning and offer only the choices Hermes displays. Nothing is approved

@@ -318,7 +318,6 @@ export function hermesCommands(cwd?: string | null, context?: HermesCommandConte
       { name: "reload-skills", description: "Reload native skills and refresh Chat suggestions", source: "builtin" as const },
       { name: "version", description: "Show native version and installation diagnostics", source: "builtin" as const },
       { name: "profile", description: "Show active profile name and home directory", source: "builtin" as const },
-      { name: "diff", description: "Show git working changes or session diff", source: "builtin" as const },
       { name: "plan", description: "Write an implementation plan to .hermes/plans/ without executing tasks", source: "builtin" as const },
       { name: "review", description: "Spawn a background subagent to review recent conversation work", source: "builtin" as const },
       { name: "init", description: "Generate or update AGENTS.md instructions (prompts model, requires write approval)", source: "builtin" as const },

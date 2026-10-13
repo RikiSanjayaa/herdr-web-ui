@@ -153,44 +153,13 @@ describe("Hermes native informational output", () => {
     expect(labels(nonemptyPrompt)).toEqual(["Dismiss"]);
     expect(answerKeys(nonemptyPrompt, { option_index: 0 })).toEqual([]);
   });
-  test("preserves diff leading whitespace, handles empty changes, errors, and arguments", () => {
-    const diffBody = "Unstaged:\n 1 file changed, 2 insertions(+)\ndiff --git a/foo.ts b/foo.ts\n--- a/foo.ts\n+++ b/foo.ts\n@@ -1,3 +1,4 @@\n   context line\n+  indented addition\n+    nested addition";
-    const screen = hermesClassicReadyOutput(`⚙️ /diff\n${diffBody}`);
-    const prompt = parseInteractivePrompt("hermes", screen, null, true, [], "/diff")!;
-    expect(prompt.title).toBe("Diff");
-    expect(prompt.body).toBe(diffBody);
-    expect(prompt.body).toContain("   context line");
-    expect(prompt.body).toContain("+  indented addition");
-    expect(prompt.body).toContain("+    nested addition");
-    expect(prompt.body).toContain(" 1 file changed, 2 insertions(+)");
-
-    // empty diff
-    const emptyScreen = hermesClassicReadyOutput("⚙️ /diff\nNo changes.");
-    const emptyPrompt = parseInteractivePrompt("hermes", emptyScreen, null, true, [], "/diff")!;
-    expect(emptyPrompt.title).toBe("Diff");
-    expect(emptyPrompt.body).toBe("No changes.");
-
-    // diff errors
-    for (const err of ["Not a git repository.", "No active agent session.", "Checkpoints are disabled in configuration."]) {
-      const errScreen = hermesClassicReadyOutput(`⚙️ /diff\n${err}`);
-      const errPrompt = parseInteractivePrompt("hermes", errScreen, null, true, [], "/diff")!;
-      expect(errPrompt.title).toBe("Diff");
-      expect(errPrompt.body).toBe(err);
+  test("leaves excluded Hermes diff output in Terminal on each native surface", () => {
+    const classic = hermesClassicReadyOutput("⚙️ /diff\nNo changes.");
+    const ink = "· /diff\n· No changes.\n─ ready │ test model │ 1 session\n❯";
+    const pager = hermesStatusOutput("No changes.", true).replace("Status", "Diff");
+    for (const screen of [classic, ink, pager]) {
+      expect(parseInteractivePrompt("hermes", screen, null, true, [], "/diff")).toBeNull();
     }
-
-    // diff arguments
-    for (const args of ["staged", "all", "session", "--stat", "src/foo.ts"]) {
-      const argScreen = hermesClassicReadyOutput(`⚙️ /diff ${args}\nNo changes.`);
-      const argPrompt = parseInteractivePrompt("hermes", argScreen, null, true, [], `/diff ${args}`)!;
-      expect(argPrompt.title).toBe("Diff");
-      expect(argPrompt.body).toBe("No changes.");
-      expect(parseInteractivePrompt("hermes", argScreen, null, true, [], "/diff")).toBeNull();
-    }
-    const nonemptyDiffPrompt = parseInteractivePrompt("hermes", hermesClassicReadyOutput(`⚙️ /diff\n${diffBody}`, "Explain this error and how to fix it"), null, true, [], "/diff")!;
-    expect(nonemptyDiffPrompt.title).toBe("Diff");
-    expect(nonemptyDiffPrompt.body).toBe(diffBody);
-    expect(labels(nonemptyDiffPrompt)).toEqual(["Dismiss"]);
-    expect(answerKeys(nonemptyDiffPrompt, { option_index: 0 })).toEqual([]);
   });
   test("parses classic review dispatch note", () => {
     const screen = hermesClassicReadyOutput("⚙️ /review\n⚖ Review subagent dispatched...");
@@ -198,7 +167,7 @@ describe("Hermes native informational output", () => {
     expect(prompt.title).toBe("Review");
     expect(prompt.body).toBe("⚖ Review subagent dispatched...");
   });
-  test("parses short Ink output for profile, diff, and review", () => {
+  test("parses short Ink output for profile and review", () => {
     const inkProfile = "· /profile\n·\nProfile: default\nHome: /tmp/selected-home\n─ ready │ test model │ 1 session\n❯";
     const pProfile = parseInteractivePrompt("hermes", inkProfile, null, true, [], "/profile")!;
     expect(pProfile.title).toBe("Profile");
@@ -213,41 +182,17 @@ describe("Hermes native informational output", () => {
     expect(pDraft.body).toBe("Profile: default\nHome: /tmp/selected-home");
     expect(answerKeys(pDraft, { option_index: 0 })).toEqual([]);
 
-    const inkDiffIndented = "· /diff\n· Unstaged:\n·   @@ -1,3 +1,3 @@\n·    context\n· +  indented_code\n─ ready │ test model │ 1 session\n❯";
-    const pDiffIndented = parseInteractivePrompt("hermes", inkDiffIndented, null, true, [], "/diff")!;
-    expect(pDiffIndented.title).toBe("Diff");
-    expect(pDiffIndented.body).toBe("Unstaged:\n  @@ -1,3 +1,3 @@\n   context\n+  indented_code");
-
-    const inkDiff = "· /diff\n· No changes.\n─ ready │ test model │ 1 session\n❯";
-    const pDiff = parseInteractivePrompt("hermes", inkDiff, null, true, [], "/diff")!;
-    expect(pDiff.title).toBe("Diff");
-    expect(pDiff.body).toBe("No changes.");
-
-    const inkDiffErr = "· /diff\n· Not a git repository.\n─ ready │ test model │ 1 session\n❯";
-    expect(parseInteractivePrompt("hermes", inkDiffErr, null, true, [], "/diff")?.body).toBe("Not a git repository.");
-
     const inkReview = "· /review\n⚖ Review subagent dispatched...\n─ ready │ test model │ 1 session\n❯";
     const pReview = parseInteractivePrompt("hermes", inkReview, null, true, [], "/review")!;
     expect(pReview.title).toBe("Review");
     expect(pReview.body).toBe("⚖ Review subagent dispatched...");
   });
-  test("recognizes native Profile, Diff, and Review pagers", () => {
+  test("recognizes native Profile and Review pagers", () => {
     const p1 = parseInteractivePrompt("hermes", hermesStatusOutput("Profile: default\nHome: /tmp/selected-home", true).replace("Status", "Profile"))!;
     expect(p1.title).toBe("Profile");
     expect(p1.body).toBe("Profile: default\nHome: /tmp/selected-home");
     expect(labels(p1)).toEqual(["Previous page", "Close"]);
     expect(answerKeys(p1, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
-
-    const diffBody = " 1 file changed, 1 insertion(+)\ndiff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n context\n+addition\n-deletion";
-    const p2 = parseInteractivePrompt("hermes", hermesStatusOutput(diffBody, false).replace("Status", "Diff"))!;
-    expect(p2.title).toBe("Diff");
-    expect(p2.body).toContain(" 1 file changed, 1 insertion(+)");
-    expect(p2.body).toContain("diff --git a/a.ts b/a.ts");
-    expect(p2.body).toContain("@@ -1 +1 @@");
-    expect(p2.body).toContain("\n context\n");
-    expect(p2.body).toContain("\n+addition\n");
-    expect(p2.body).toContain("\n-deletion");
-    expect(labels(p2)).toEqual(["Previous page", "Next page", "Close"]);
 
     const p3 = parseInteractivePrompt("hermes", hermesStatusOutput("Review results:\n- Issue 1 fixed", true).replace("Status", "Review"))!;
     expect(p3.title).toBe("Review");
@@ -3337,8 +3282,8 @@ describe("an answer and the menu it was made for", () => {
   });
 
   test("leaves unchanged Hermes pager actionable after navigation and closes with escape", async () => {
-    const diffScreen = hermesStatusOutput("diff --git a/file b/file\n+change", true).replace("Status", "Diff");
-    await withPane("hermes", "idle", diffScreen, async pane => {
+    const profileScreen = hermesStatusOutput("Profile: default\nHome: /tmp/selected-home", true).replace("Status", "Profile");
+    await withPane("hermes", "idle", profileScreen, async pane => {
       const first = (await card())!;
       expect(labels(first)).toEqual(["Previous page", "Close"]);
       pane.onSent = key => { if (key === "esc") pane.screen = "─ ready\n❯"; };

@@ -16,8 +16,8 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   Resolved panes also offer `/help`, `/status`, `/reload-skills` and `/version` as terminal-backed cards:
   visible output with a key-free dismiss action, and explicit navigation and close for Ink's
   informational pagers. Successful skill reloads refresh that pane's Chat suggestions immediately.
-  `/profile` and `/diff` show native results with the same controls, preserving diff arguments and
-  patch whitespace. `/plan`, `/init` and `/review` use native execution and transcript persistence;
+  `/profile` shows its native result with the same controls. `/plan`, `/init` and `/review` use
+  native execution and transcript persistence;
   recognized approval cards preserve warnings and explicit consent for protected instruction files.
   ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)
 - **Two tabs side by side** on a desktop, from different workspaces or PCs: drag a tab down out

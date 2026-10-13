@@ -2251,21 +2251,13 @@ function parseHermesPager(screen: string): ParsedPrompt | null {
   const inner = rows.map(line => line.slice(line.indexOf("║") + 1, line.lastIndexOf("║")));
   const lines = inner.map(line => line.trim());
   const title = lines.findIndex(Boolean);
-  if (title < 0 || !["Status", "Reload Skills", "Version", "Profile", "Diff", "Review"].includes(lines[title]!)) return null;
+  if (title < 0 || !["Status", "Reload Skills", "Version", "Profile", "Review"].includes(lines[title]!)) return null;
   const hint = lines.findIndex((line, index) => index > title && /^(?:↑|end)/.test(line) && [1, 2, 3, 4, 5, 6, 7, 8].some(span => HERMES_PAGER_HINT_RE.test(lines.slice(index, index + span).join("").replace(/\s+/g, ""))));
   if (hint < 0) return null;
-  const isDiff = lines[title] === "Diff";
-  const bodyRows = inner.slice(title + 1, hint).map(line => {
-    if (isDiff) {
-      const unboxed = line.startsWith("  ") ? line.slice(2) : line.startsWith(" ") ? line.slice(1) : line;
-      return unboxed.trimEnd();
-    }
-    const unboxed = line.startsWith(" ") && line.endsWith(" ") ? line.slice(1, -1) : line.startsWith(" ") ? line.slice(1) : line;
-    return unboxed.trim();
-  });
+  const bodyRows = inner.slice(title + 1, hint).map(line => line.trim());
   while (bodyRows.length > 0 && !bodyRows[0]!.trim()) bodyRows.shift();
   while (bodyRows.length > 0 && !bodyRows.at(-1)!.trim()) bodyRows.pop();
-  const body = isDiff ? bodyRows.join("\n") : bodyRows.join("\n").trim();
+  const body = bodyRows.join("\n").trim();
   const end = lines[hint]!.startsWith("end ·");
   const options = end ? ["Previous page", "Close"] : ["Previous page", "Next page", "Close"];
   return finishPrompt("hermes", {
@@ -2299,11 +2291,11 @@ function parseHermesHelp(screen: string, sent: string | null): ParsedPrompt | nu
   return hermesOutputPrompt("Help", lines.slice(title >= 0 ? start + 1 : start, end).filter(line => !isDivider(line)).map(line => line.replace(/\s*┃$/, "")).join("\n").trim());
 }
 
-/** Ink short system messages (profile, diff, review) above its ready footer. */
+/** Ink short system messages (profile, review) above its ready footer. */
 function parseHermesInkOutput(screen: string, sent: string | null): ParsedPrompt | null {
   const trimmedSent = sent?.trim() ?? "";
   const baseCommand = trimmedSent.split(/\s+/)[0] ?? "";
-  if (baseCommand !== "/profile" && baseCommand !== "/diff" && baseCommand !== "/review") return null;
+  if (baseCommand !== "/profile" && baseCommand !== "/review") return null;
   const rawLines = screen.replace(ANSI_RE, "").split(/\r?\n/);
   const unchromed = rawLines.map(line => line.replace(/\s*[┃│]$/, ""));
   const lines = unchromed.map(cleanLine);
@@ -2330,33 +2322,6 @@ function parseHermesInkOutput(screen: string, sent: string | null): ParsedPrompt
     return hermesOutputPrompt("Profile", output.slice(profileIndex, homeIndex + 1).map(l => l.replace(/^·\s*/, "")).join("\n").trim());
   }
 
-  if (baseCommand === "/diff") {
-    let diffStart = echo + 1;
-    while (diffStart < output.length && !output[diffStart]) diffStart += 1;
-    if (diffStart >= output.length) return null;
-    const firstLine = output[diffStart]!.replace(/^·\s*/, "");
-    const isHeader = /^(?:Unstaged:|Staged:|All \(vs HEAD\):)$/.test(firstLine);
-    const isEmpty = firstLine === "No changes.";
-    const isError = firstLine === "Not a git repository." || firstLine === "No active agent session." || /^Checkpoints? (?:are )?disabled\b/i.test(firstLine);
-    if (!isHeader && !isEmpty && !isError) return null;
-    let diffEnd = diffStart;
-    if (isHeader) {
-      diffEnd = output.length - 1;
-      while (diffEnd > diffStart && !output[diffEnd]) diffEnd -= 1;
-    } else if (isError && /^Checkpoints? (?:are )?disabled\b/i.test(firstLine)) {
-      while (diffEnd + 1 < output.length && output[diffEnd + 1] && !output[diffEnd + 1]!.startsWith("·")) diffEnd += 1;
-    }
-    if (output.slice(diffEnd + 1).some(Boolean)) return null;
-    if (isEmpty || (isError && diffStart === diffEnd)) {
-      return hermesOutputPrompt("Diff", firstLine);
-    }
-    const diffLines = unchromedOutput.slice(diffStart, diffEnd + 1).map(l => l.replace(/^· ?/, "").trimEnd());
-    while (diffLines.length > 0 && !diffLines[0]!.trim()) diffLines.shift();
-    while (diffLines.length > 0 && !diffLines.at(-1)!.trim()) diffLines.pop();
-    if (diffLines.length === 0) return null;
-    return hermesOutputPrompt("Diff", diffLines.join("\n"));
-  }
-
   if (baseCommand === "/review") {
     let reviewStart = echo + 1;
     while (reviewStart < output.length && !output[reviewStart]) reviewStart += 1;
@@ -2379,7 +2344,7 @@ function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPr
   const command = trimmedSent.replace(/^\/reload_skills$/, "/reload-skills").replace(/^\/v$/, "/version");
   const baseCommand = command.split(/\s+/)[0] ?? "";
   if (baseCommand !== "/help" && baseCommand !== "/status" && baseCommand !== "/reload-skills" && baseCommand !== "/version"
-    && baseCommand !== "/profile" && baseCommand !== "/diff" && baseCommand !== "/review") return null;
+    && baseCommand !== "/profile" && baseCommand !== "/review") return null;
   const rawLines = screen.replace(ANSI_RE, "").split(/\r?\n/);
   const lines = rawLines.map(cleanLine);
   const input = findLastIndex(lines, line => /^(?:[\w.-]+\s+)?❯(?:\s.*)?$/.test(line));
@@ -2387,7 +2352,6 @@ function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPr
   const footer = findLastIndex(lines.slice(0, input), line => /^[⚕☤]\s.+│/.test(line));
   if (footer < 0 || lines.slice(footer + 1, input).some(line => line && !isDivider(line))) return null;
   const output = lines.slice(0, footer);
-  const rawOutput = rawLines.slice(0, footer);
 
   if (baseCommand === "/profile") {
     const echo = findLastIndex(output, line => /^(?:⚙️?\s*)?\/profile(?:\s+\S+)?$/.test(line));
@@ -2400,37 +2364,6 @@ function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPr
     if (output.slice(echo + 1, profileIndex).some(Boolean)) return null;
     if (output.slice(homeIndex + 1).some(Boolean)) return null;
     return hermesOutputPrompt("Profile", output.slice(profileIndex, homeIndex + 1).join("\n").trim());
-  }
-
-  if (baseCommand === "/diff") {
-    const echo = findLastIndex(output, line => /^(?:⚙️?\s*)?\/diff(?:\s+.*)?$/.test(line));
-    if (echo < 0) return null;
-    const echoCmd = output[echo]!.replace(/^(?:⚙️?\s*)?/, "").trim();
-    if (echoCmd.replace(/\s+/g, " ") !== command.replace(/\s+/g, " ")) return null;
-    let diffStart = echo + 1;
-    while (diffStart < output.length && !output[diffStart]) diffStart += 1;
-    if (diffStart >= output.length) return null;
-    const firstLine = output[diffStart]!;
-    const isHeader = /^(?:Unstaged:|Staged:|All \(vs HEAD\):)$/.test(firstLine);
-    const isEmpty = firstLine === "No changes.";
-    const isError = firstLine === "Not a git repository." || firstLine === "No active agent session." || /^Checkpoints? (?:are )?disabled\b/i.test(firstLine);
-    if (!isHeader && !isEmpty && !isError) return null;
-    let diffEnd = diffStart;
-    if (isHeader) {
-      diffEnd = output.length - 1;
-      while (diffEnd > diffStart && !output[diffEnd]) diffEnd -= 1;
-    } else if (isError && /^Checkpoints? (?:are )?disabled\b/i.test(firstLine)) {
-      while (diffEnd + 1 < output.length && output[diffEnd + 1] && !output[diffEnd + 1]!.startsWith("⚙️")) diffEnd += 1;
-    }
-    if (output.slice(diffEnd + 1).some(Boolean)) return null;
-    if (isEmpty || (isError && diffStart === diffEnd)) {
-      return hermesOutputPrompt("Diff", firstLine);
-    }
-    const diffLines = rawOutput.slice(diffStart, diffEnd + 1).map(l => l.trimEnd());
-    while (diffLines.length > 0 && !diffLines[0]!.trim()) diffLines.shift();
-    while (diffLines.length > 0 && !diffLines.at(-1)!.trim()) diffLines.pop();
-    if (diffLines.length === 0) return null;
-    return hermesOutputPrompt("Diff", diffLines.join("\n"));
   }
 
   if (baseCommand === "/review") {
