@@ -2443,12 +2443,19 @@ function hermesNeedsTerminal(screen: string): boolean {
     const classicHint = /↑\/↓ to select, Enter to confirm/.test(line);
     const classic = /Dangerous Command/.test(line) || classicHint;
     const native = classic || /⚠️?[^\n]* required ·|↑\/↓ select · Enter confirm · 1-|Esc\/q\s+close\s*\(/.test(line)
-      || /^\s*║\s*(?:Status|Reload Skills|Version|Profile|Review|Diff|Context)\s*║/.test(line);
+      || /^\s*║\s*(?:Status|Reload Skills|Version|Profile|Review|Diff|Context)\s*║/.test(line)
+      // Pager navigation remains native chrome when its body or Close caption is damaged.
+      || /^\s*║\s*(?:↑↓\/jk line · Enter\/Space\/PgDn page ·|end · ↑↓\/jk · b\/PgUp back ·)/.test(line);
     if (!native) continue;
     // Classic's hint is outside its panel; check its composer rather than treating it as a row.
     if (classicHint && hermesTail(lines, index - 1, true, true)) return true;
-    // A complete boundary still identifies the native tail when an interior row is damaged.
-    const bottom = lines.findIndex((following, next) => next > index && /^\s*[╰╚]/.test(following));
+    // A border belongs to this fragment only while panel rows remain contiguous.
+    let bottom = -1;
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const following = lines[next]!;
+      if (/^\s*[╰╚]/.test(following)) { bottom = next; break; }
+      if (following.trim() && !/^\s*[│║]/.test(following)) break;
+    }
     let end = bottom >= 0 ? bottom : index;
     if (bottom < 0) {
       // Without a bottom border, require the remaining panel rows to reach native chrome.

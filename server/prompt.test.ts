@@ -3533,6 +3533,8 @@ describe("an answer and the menu it was made for", () => {
       hermesStatusOutput().replace("Status", "Logs"),
       hermesStatusOutput().replace("Esc/q close", "unreadable close hint"),
       hermesStatusOutput().replace(/^║.*Model:.*$/m, "unreadable status row").replace("Esc/q close", "unreadable close hint"),
+      hermesStatusOutput(undefined, true).replace(/^║.*Model:.*$/m, "unreadable status row").replace("Esc/q close", "unreadable close hint"),
+      hermesStatusOutput(undefined, false, true).replace(/^║.*Model:.*$/m, "unreadable status row").replace("Esc/q close", "unreadable close hint"),
       hermesStatusOutput("No changes.", true).replace("Status", "Diff"),
       hermesStatusOutput("Context details", true).replace("Status", "Context"),
     ];
@@ -3564,6 +3566,22 @@ describe("an answer and the menu it was made for", () => {
     ];
     for (const quote of quotes) {
       await withPane("hermes", "blocked", `${quote}\nContinue with the unrelated task? (y/n)`, async pane => {
+        promptWaitEnded("p_1");
+        const shown = (await card())!;
+        expect(shown.fallback).toBe(true);
+        expect(labels(shown)).toContain("Enter");
+        expect(pane.sent).toEqual([]);
+      });
+    }
+  });
+
+  test("does not associate old native prose with an unrelated later box", async () => {
+    const screens = [
+      "The old log said Dangerous Command.\nAnother task now needs input.\n╭────────────────────────────╮\n│ Continue deployment? (y/n) │\n╰────────────────────────────╯\n─ ─",
+      "Quoted warning: ⚠ Approval required · write permission\nAnother task now needs input.\n╔════════════════════════════╗\n║ Continue deployment? (y/n) ║\n╚════════════════════════════╝\n─ ─",
+    ];
+    for (const screen of screens) {
+      await withPane("hermes", "blocked", screen, async pane => {
         promptWaitEnded("p_1");
         const shown = (await card())!;
         expect(shown.fallback).toBe(true);
