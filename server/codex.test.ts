@@ -638,6 +638,15 @@ describe("Codex rollout resolution", () => {
     expect(matchShortCodexAnswers(`${shortScreen.join("\n\n")}\nOpenAI Codex (v1.0)\nNew session`, [shared[0]!])).toBeNull();
   });
 
+  it("keeps byte-identical rollouts ambiguous and screen matches local to each call", () => {
+    const candidate = { path: "one", text: shortRollout };
+    const screen = shortScreen.join("\n\n");
+    expect(matchShortCodexAnswers(screen, [candidate])).toBe("one");
+    expect(matchShortCodexAnswers(screen, [candidate, { ...candidate, path: "copy" }])).toBeNull();
+    expect(matchShortCodexAnswers("Different pane", [candidate])).toBeNull();
+    expect(matchShortCodexAnswers(screen, [candidate])).toBe("one");
+  });
+
   // the review of #284: each case once bound the wrong rollout, or lost the right one
   const looked = "I'll look at the file and run the tests.";
   const changed = "I'll make the change and verify the result.";

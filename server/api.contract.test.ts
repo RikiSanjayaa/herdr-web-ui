@@ -5,13 +5,15 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { ConversationMonitor } from "./conversation-monitor.ts";
 import { createServer } from "./index.ts";
+import type { AgentKind, AgentStatus, ApiError, HealthAuth, IntegrationsResponse, LanExposure, PortalStatus, PushKey, RemoteAccess, SessionSnapshot, TabMoved, PaneFindResponse, PaneReadResult, UsageReport, WorkspaceCreated, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../shared/protocol.ts";
 import { HerdrUpdater } from "./herdr-update.ts";
-import type { AgentKind, AgentStatus, ApiError, HealthAuth, IntegrationsResponse, LanExposure, PushKey, RemoteAccess, SessionSnapshot, TabMoved, PaneFindResponse, PaneReadResult, UsageReport, WorkspaceCreated, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../shared/protocol.ts";
+import { PortalService } from "./portal.ts";
 import { noInstalledNotes, unmanagedUpdateStatus, type HerdrUpdateStatus, type InstalledNotes, type UpdateNotes } from "../shared/update.ts";
 import { USAGE_PROVIDERS, UsageService } from "./usage.ts";
 import { VoiceService } from "./voice.ts";
 import { Telemetry } from "./telemetry.ts";
-import type { TelemetryStatus } from "../shared/telemetry.ts";
+import { NOTICE_VERSION, type TelemetryEvent, type TelemetryStatus } from "../shared/telemetry.ts";
+import { DEFAULT_SETTINGS, telemetrySettingsSnapshot } from "../src/lib/settings.ts";
 import { herdrRpc, ping, sessionSnapshot, tabCreate, workspaceCreate, workspaceClose } from "./herdr/client.ts";
 import { startFakePushService, type FakePushService } from "./push.fake.ts";
 import { descriptorPath, type BridgeDescriptor } from "./bridge.ts";
@@ -473,24 +475,53 @@ describe("telemetry API", () => {
     }
   });
 
-  it("tells the switch and the next event, and takes the notice and the switch from the app", async () => {
+  it("validates real settings payloads, protects acknowledgement, and previews only safe event values", async () => {
     const state = mkdtempSync(join(tmpdir(), "herdr-telemetry-api-"));
-    const sent: unknown[] = [];
+    const sent: TelemetryEvent[] = [];
     const telemetry = new Telemetry({ stateDir: state, version: "9.9.9", env: {}, url: "http://receiver.invalid/v1/events", noticeGraceMs: 0,
-      fetch: (async (_url: string | URL | Request, init?: RequestInit) => { sent.push(JSON.parse(String(init?.body))); return new Response(null, { status: 204 }); }) as typeof fetch });
+      fetch: (async (_url: string | URL | Request, init?: RequestInit) => { sent.push(JSON.parse(String(init?.body)) as TelemetryEvent); return new Response(null, { status: 204 }); }) as typeof fetch });
     const server = createServer({ port: 0, stateDir: state, token: "", telemetry });
     const url = `http://localhost:${server.port}/api/telemetry`;
+    const headers = { "content-type": "application/json", "x-herdr-update": "1", origin: new URL(url).origin };
+    const settings = telemetrySettingsSnapshot({
+      ...DEFAULT_SETTINGS,
+      theme: "light",
+      terminalFontFamily: "private font name",
+      quickReplies: ["private reply"],
+      usageHidden: ["private-account-key"],
+    });
     try {
       const first = await fetch(url);
       expect(first.headers.get("cache-control")).toBe("no-store");
-      expect(await first.json() as TelemetryStatus).toMatchObject({ enabled: true, notice_seen: false, blocked_by_env: false, next: { event: "install", version: "9.9.9" } });
-      expect((await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ notice_seen: true }) })).status).toBe(403);
-      const seen = await fetch(url, { method: "POST", headers: { "content-type": "application/json", "x-herdr-update": "1" }, body: JSON.stringify({ notice_seen: true }) });
-      expect(await seen.json() as TelemetryStatus).toMatchObject({ notice_seen: true });
+      expect(await first.json() as TelemetryStatus).toMatchObject({ enabled: true, notice_seen: false, blocked_by_env: false, next: { event: "install", version: "9.9.9", settings: null } });
+
+      const post = (body: unknown, extraHeaders: Record<string, string> = {}) => fetch(url, {
+        method: "POST", headers: { ...headers, ...extraHeaders }, body: JSON.stringify(body),
+      });
+      expect((await post({ notice_seen: true, notice_version: NOTICE_VERSION }, { "x-herdr-update": "" })).status).toBe(403);
+      expect((await post({ notice_seen: true, notice_version: NOTICE_VERSION }, { origin: "https://attacker.invalid", "sec-fetch-site": "cross-site" })).status).toBe(403);
+      expect((await post({ notice_seen: true })).status).toBe(400);
+      expect((await post({ notice_seen: true, notice_version: NOTICE_VERSION - 1 })).status).toBe(400);
+      expect((await post({ settings: { ...settings, theme: "private text" } })).status).toBe(400);
+      expect((await post({ settings: { ...settings, injected: true } })).status).toBe(400);
+      expect((await post({ settings, changed_settings: ["theme"] })).status).toBe(400);
+      expect(await (await fetch(url)).json() as TelemetryStatus).toMatchObject({ notice_seen: false, next: { settings: null } });
+      expect(sent).toEqual([]);
+
+      const seen = await post({ notice_seen: true, notice_version: NOTICE_VERSION, settings });
+      const preview = await seen.json() as TelemetryStatus;
+      expect(seen.status).toBe(200);
+      expect(preview).toMatchObject({ notice_seen: true, next: { event: "install", settings } });
+      expect(JSON.stringify(preview)).not.toContain("private font name");
+      expect(JSON.stringify(preview)).not.toContain("private reply");
+      expect(JSON.stringify(preview)).not.toContain("private-account-key");
       await telemetry.report();
-      expect(sent).toEqual([expect.objectContaining({ event: "install", version: "9.9.9" })]);
+      expect(sent).toEqual([expect.objectContaining({ event: "install", version: "9.9.9", settings })]);
+      expect(JSON.stringify(sent[0]!.settings)).not.toContain("private font name");
+      expect(JSON.stringify(sent[0]!.settings)).not.toContain("private reply");
+      expect(JSON.stringify(sent[0]!.settings)).not.toContain("private-account-key");
       expect(await (await fetch(url)).json() as TelemetryStatus).toMatchObject({ next: null });
-      const off = await fetch(url, { method: "POST", headers: { "content-type": "application/json", "x-herdr-update": "1" }, body: JSON.stringify({ enabled: false }) });
+      const off = await post({ enabled: false });
       expect(await off.json() as TelemetryStatus).toMatchObject({ enabled: false });
     } finally { server.stop(); rmSync(state, { recursive: true, force: true }); }
   });
@@ -530,6 +561,89 @@ describe("phone access", () => {
     try {
       expect((await fetch(`http://localhost:${protectedServer.port}/api/access`)).status).toBe(401);
     } finally { protectedServer.stop(); rmSync(protectedState, { recursive: true, force: true }); }
+  });
+});
+
+describe("Portal API", () => {
+  it("does not serve requests until startup cleanup completes", async () => {
+    const state = mkdtempSync(join(tmpdir(), "herdr-portal-startup-gate-"));
+    let releaseCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    class DeferredPortal extends PortalService {
+      override resume(): Promise<void> { return cleanup; }
+    }
+    const server = createServer({ port: 0, stateDir: state, token: "", portal: new DeferredPortal({ stateDir: state }) });
+    try {
+      let resolved = false;
+      const request = fetch(`http://127.0.0.1:${server.port}/api/health?scope=bridge`).then((response) => {
+        resolved = true;
+        return response;
+      });
+      const deadline = Date.now() + 50;
+      while (!resolved && Date.now() < deadline) await Bun.sleep(5);
+      expect(resolved).toBe(false);
+      releaseCleanup();
+      const response = await request;
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: true, bridge_protocol: expect.any(Number) });
+    } finally {
+      releaseCleanup();
+      server.stop();
+      rmSync(state, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when startup cleanup rejects", async () => {
+    const state = mkdtempSync(join(tmpdir(), "herdr-portal-startup-failure-"));
+    class FailedPortal extends PortalService {
+      override resume(): Promise<void> { return Promise.reject(new Error("Portal cleanup failed")); }
+    }
+    const server = createServer({ port: 0, stateDir: state, token: "", portal: new FailedPortal({ stateDir: state }) });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/api/health?scope=bridge`);
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({ error: { code: "internal_error" } });
+    } finally {
+      server.stop();
+      rmSync(state, { recursive: true, force: true });
+    }
+  });
+
+  it("opens a public address only behind the token, and closes it again", async () => {
+    const state = mkdtempSync(join(tmpdir(), "herdr-portal-api-"));
+    const standIn = join(state, "stand-in-portal");
+    writeFileSync(standIn, [
+      "#!/bin/sh",
+      'case "$1" in',
+      "  version) echo v2.6.1 ;;",
+      "  expose) trap 'exit 0' TERM; echo 'INF service ready at https://herdr-test-0123.relay.example:443'; while :; do sleep 0.05; done ;;",
+      "  *) exit 2 ;;",
+      "esac",
+      "",
+    ].join("\n"));
+    chmodSync(standIn, 0o755);
+    const relay = (async () => Response.json({ data: { release_version: "v2.6.1" } })) as unknown as typeof fetch;
+    const server = createServer({ port: 0, stateDir: state, token: "test-portal-token", portal: new PortalService({ stateDir: state, bin: standIn, fetch: relay }) });
+    const url = `http://127.0.0.1:${server.port}/api/portal`;
+    const signedIn = { authorization: "Bearer test-portal-token" };
+    const post = (action: string, headers: Record<string, string>) => fetch(`${url}/${action}`, { method: "POST", headers: { ...headers, "x-herdr-update": "1", "content-type": "application/json" }, body: JSON.stringify({ relay: "relay.example" }) });
+    const status = async (headers: Record<string, string> = signedIn) => await (await fetch(url, { headers })).json() as PortalStatus;
+    try {
+      expect((await fetch(url)).status).toBe(401);
+      expect(await status()).toMatchObject({ supported: true, usable: true, blocked: null, phase: "idle" });
+      expect((await post("start", {})).status).toBe(401);
+      expect((await post("start", signedIn)).status).toBe(202);
+      const deadline = Date.now() + 10_000;
+      let running = await status();
+      while (running.phase === "starting") {
+        if (Date.now() >= deadline) throw new Error("Timed out: Portal was ready");
+        await Bun.sleep(20);
+        running = await status();
+      }
+      expect(running).toMatchObject({ phase: "running", url: "https://herdr-test-0123.relay.example", relay: "https://relay.example" });
+      expect((await post("stop", signedIn)).status).toBe(202);
+      expect((await status()).url).toBeNull();
+    } finally { server.stop(); rmSync(state, { recursive: true, force: true }); }
   });
 });
 
@@ -2695,6 +2809,9 @@ describe("token auth", () => {
       const { code } = (await (await fetch(`http://127.0.0.1:${open.port}/api/devices/pair/start`, { method: "POST", headers: guard })).json()) as { code: string };
       const paired = await fetch(`http://127.0.0.1:${open.port}/api/devices/pair`, { method: "POST", headers: { ...guard, "x-forwarded-for": "100.64.0.9" }, body: JSON.stringify({ code, label: "Phone" }) });
       expect(paired.status).toBe(204);
+      expect((await health(open.port)).lan_exposure).toEqual({ host: "0.0.0.0" });
+      const cookie = paired.headers.get("set-cookie")!.split(";")[0]!;
+      expect((await health(open.port, { cookie })).auth).toMatchObject({ authenticated: true, via: "device" });
       expect((await health(open.port)).auth).toMatchObject({ authenticated: true, via: "local" });
       expect((await health(open.port)).lan_exposure).toBeUndefined();
     } finally {

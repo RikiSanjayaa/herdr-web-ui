@@ -36,6 +36,7 @@ import type {
   PlanStep,
   PromptAnswer,
   PushKey,
+  PortalStatus,
   RemoteAccess,
   RemoveWorktreeRequest,
   ResizePaneRequest,
@@ -60,7 +61,7 @@ import type {
 import type { PaneScrollInfo } from "../../shared/herdr-api.generated.ts";
 import { readInstalledNotes, readUpdateNotes, type HerdrUpdateStatus, type InstalledNotes, type UpdateCommand, type UpdateNotes, type UpdateStatus } from "../../shared/update.ts";
 import type { AlertPrefs } from "../../shared/notify-policy.ts";
-import type { ReportedSetting, TelemetryStatus } from "../../shared/telemetry.ts";
+import type { TelemetryChange, TelemetryStatus } from "../../shared/telemetry.ts";
 import type { VoiceConfigUpdate, VoiceStatus } from "../../shared/voice.ts";
 import { MAX_ATTACHMENT_BYTES } from "../../shared/attachments.ts";
 import { t } from "./i18n.ts";
@@ -107,6 +108,17 @@ export async function requestHerdrUpdate(): Promise<void> {
   if (!response.ok) throw await errorFrom(url, response);
 }
 
+/** Settings → Phone & devices: Portal's public address for the server's PC. */
+export function fetchPortal(): Promise<PortalStatus> {
+  return getJson<PortalStatus>("/api/portal");
+}
+
+export async function requestPortal(action: "start" | "stop", relay?: string): Promise<void> {
+  const url = `/api/portal/${action}`;
+  const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json", "x-herdr-update": "1" }, body: JSON.stringify(relay === undefined ? {} : { relay }) });
+  if (!response.ok) throw await errorFrom(url, response);
+}
+
 /** Anonymous install and update counts; null from a server that sends none (404). */
 /** What every browser of this server shares (shared/preferences.ts); null where the server predates it. */
 export async function fetchPreferences(): Promise<SharedPreferences | null> {
@@ -126,7 +138,7 @@ export async function fetchTelemetry(): Promise<TelemetryStatus | null> {
   catch (error) { if (error instanceof ApiError && error.status === 404) return null; throw error; }
 }
 
-export async function changeTelemetry(change: { enabled?: boolean; notice_seen?: true; changed_settings?: ReportedSetting[] }): Promise<TelemetryStatus> {
+export async function changeTelemetry(change: TelemetryChange): Promise<TelemetryStatus> {
   const url = "/api/telemetry";
   const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json", "x-herdr-update": "1" }, body: JSON.stringify(change) });
   if (!response.ok) throw await errorFrom(url, response);

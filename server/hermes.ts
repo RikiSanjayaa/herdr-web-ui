@@ -1,9 +1,10 @@
 import { Database } from "bun:sqlite";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { constants, existsSync, opendirSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
-import { readFile, stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
+import { promisify } from "node:util";
 
 import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPane } from "../shared/protocol.ts";
 import { herdrRpc } from "./herdr/client.ts";
@@ -11,20 +12,35 @@ import { answerVersion, ConversationNotStarted, ConversationUnavailable, type Co
 import { toolSummary } from "./transcript-records.ts";
 import { TOOL_OUTPUT_CHARS, trimOutput } from "./tool-output.ts";
 import { processStartedAt } from "./process-start.ts";
-import { hermesNativeFeatures, type HermesCommandContext } from "./hermes-commands.ts";
+import { hermesNativeFeatures, readHermesFile, type HermesCommandContext } from "./hermes-commands.ts";
 
 /** Recognize only the native single-skill scaffold, not quoted or incomplete examples. */
 function hermesSkillParts(text: string): ConversationPart[] | null {
   const header = /^\[IMPORTANT: The user has invoked the "([^"\r\n<>]{1,200})" skill, indicating they want you to follow its instructions\. The full skill content is loaded below\.\]\n\n/.exec(text);
   if (!header || text.endsWith("\n… trimmed")) return null;
+  const footers = [...text.matchAll(/\n\n\[Skill directory: ([^\r\n\]]+)\]\nResolve any relative paths in this skill \(e\.g\. `scripts\/foo\.js`, `templates\/config\.yaml`\) against that directory, then run them with the terminal tool using the absolute path\./g)];
+  // More than one footer can be a quoted envelope inside the body or request.
+  // Without persisted provenance, keep that ambiguous message verbatim.
+  if (footers.length !== 1) return null;
+  const footer = footers[0]!;
+  let suffix = text.slice(footer.index! + footer[0].length);
+  const config = /^\n\n\[Skill config \(from [^\r\n]+\):\n(?:  [^\r\n]*\n)+\]/.exec(suffix);
+  if (config) suffix = suffix.slice(config[0].length);
+  const setup = /^\n\n\[Skill setup note: [^\r\n]*\]/.exec(suffix);
+  if (setup) suffix = suffix.slice(setup[0].length);
+  const support = /^\n\n\[This skill has supporting files \(paths relative to the skill directory above\):\]\n(?:- [^\r\n]+\n)+\nLoad any of these with skill_view\(name="[^"\r\n]+", file_path="<path>"\), or run scripts directly by absolute path \(e\.g\. `node [^\r\n]+\/scripts\/foo\.js`\)\./.exec(suffix);
+  if (support) suffix = suffix.slice(support[0].length);
   const marker = "\n\nThe user has provided the following instruction alongside the skill invocation: ";
-  const boundary = text.lastIndexOf(marker);
-  const request = boundary < 0 ? "" : text.slice(boundary + marker.length).split("\n\n[Runtime note:")[0]!;
-  const directory = /\n\n\[Skill directory: ([^\r\n\]]+)\]\nResolve any relative paths in this skill/.exec(boundary < 0 ? text : text.slice(0, boundary));
+  let request = "";
+  if (suffix.startsWith(marker)) request = suffix.slice(marker.length);
+  else if (suffix && !/^\n\n\[Runtime note: [\s\S]*\]$/.test(suffix)) return null;
+  // Only a complete trailing native note is scaffolding; a quoted marker or
+  // an incomplete note in the user's request must not clip the rest of it.
+  request = request.replace(/\n\n\[Runtime note: [^\[\]]*\]$/, "");
   return [
     ...(request ? [{ kind: "text" as const, text: request }] : []),
     { kind: "skill", skill: { name: header[1]!, evidence: "instructions", status: "loaded",
-      ...(directory ? { path: `${directory[1]!.replace(/[\\/]$/, "")}/SKILL.md` } : {}) } },
+      path: `${footer[1]!.replace(/[\\/]$/, "")}/SKILL.md` } },
   ];
 }
 
@@ -98,8 +114,13 @@ export function hermesDbPath(hermesHome = defaultHermesHome()): string {
 }
 
 /** What processHermesHome found, by pid and argv, and when. */
-const processHomes = new Map<string, { home: string | null; at: number }>();
+const processHomes = new Map<string, { home: string | null; startedAt: number; at: number }>();
 const PROCESS_HOME_TTL_MS = 30_000;
+
+function sameProcessLifetime(pid: number, startedAt: number): boolean {
+  const current = processStartedAt(pid);
+  return current !== null && Math.abs(current - startedAt) <= (process.platform === "darwin" ? 1000 : 0);
+}
 
 /** The HERMES_HOME in one macOS `ps -E -o command=` line. */
 export function hermesHomeInPsLine(text: string): string | null {
@@ -108,28 +129,31 @@ export function hermesHomeInPsLine(text: string): string | null {
 
 /** The HERMES_HOME a process started with, cached because a process's environment does not change. */
 export async function processHermesHome(pid: number, argv: readonly string[] = []): Promise<string | null> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  const startedAt = processStartedAt(pid);
+  if (startedAt === null) return null;
   const key = `${pid}\0${argv.join("\0")}`;
   const known = processHomes.get(key);
-  if (known && Date.now() - known.at < PROCESS_HOME_TTL_MS) return known.home;
-  let home: string | null = null;
+  if (known && Date.now() - known.at < PROCESS_HOME_TTL_MS
+    && Math.abs(known.startedAt - startedAt) <= (process.platform === "darwin" ? 1000 : 0)) return known.home;
   try {
-    if (process.platform === "linux") {
-      home = (await readFile(`/proc/${pid}/environ`, "utf8")).split("\0").find((entry) => entry.startsWith("HERMES_HOME="))?.slice(12) || null;
-    } else if (process.platform === "darwin") {
-      const child = Bun.spawn(["/bin/ps", "-E", "-ww", "-p", String(pid), "-o", "command="], { stdout: "pipe", stderr: "ignore" });
-      const timer = setTimeout(() => child.kill(), 3000);
-      try {
-        const text = await new Response(child.stdout).text();
-        await child.exited;
-        home = hermesHomeInPsLine(text);
-      } finally { clearTimeout(timer); }
+    const env = await hermesProcessEnvironment(pid);
+    if (!env || !sameProcessLifetime(pid, startedAt)) return null;
+    const explicit = env.HERMES_HOME || null;
+    if (!explicit) {
+      processHomes.delete(key);
+      processHomes.set(key, { home: null, startedAt, at: Date.now() });
+      if (processHomes.size > 256) processHomes.delete(processHomes.keys().next().value!);
+      return null;
     }
-    if (home === null || !isAbsolute(home) || !(await stat(home).catch(() => null))?.isDirectory()) home = null;
-  } catch { home = null; }
-  processHomes.delete(key);
-  processHomes.set(key, { home, at: Date.now() });
-  if (processHomes.size > 256) processHomes.delete(processHomes.keys().next().value!);
-  return home;
+    if (!isAbsolute(explicit)) return null;
+    const isDir = (await stat(explicit).catch(() => null))?.isDirectory();
+    if (!isDir || !sameProcessLifetime(pid, startedAt)) return null;
+    processHomes.delete(key);
+    processHomes.set(key, { home: explicit, startedAt, at: Date.now() });
+    if (processHomes.size > 256) processHomes.delete(processHomes.keys().next().value!);
+    return explicit;
+  } catch { return null; }
 }
 
 /** Recognizes the Hermes executable, including Python launching its entrypoint. */
@@ -152,28 +176,53 @@ interface HermesProcess { pid: number; name?: string; argv0?: string; argv?: str
 
 function isTuiGateway(process: HermesProcess): boolean {
   const args = process.argv ?? [];
-  const module = args.indexOf("-m");
-  return module >= 0 && args[module + 1] === "tui_gateway.entry";
+  const executable = (args[0] ?? "").replaceAll("\\", "/").split("/").at(-1)!;
+  if (!/^(?:python(?:\d+(?:\.\d+)*)?|pypy\d*|py)(?:\.exe)?$/i.test(executable)) return false;
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "-m") return args[i + 1] === "tui_gateway.entry";
+    if (arg === "-c" || arg === "--" || !arg.startsWith("-")) return false;
+    if (arg === "-X" || arg === "-W") i++;
+  }
+  return false;
 }
 
 /** Read native environment only on the server; never serialize it in an HTTP response. */
+const run = promisify(execFile);
+
 async function hermesProcessEnvironment(pid: number): Promise<Record<string, string> | null> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
     if (process.platform === "linux") {
-      const data = await readFile(`/proc/${pid}/environ`, "utf8");
+      const file = await open(`/proc/${pid}/environ`, constants.O_RDONLY | constants.O_NONBLOCK);
+      let data: string;
+      try {
+        const buffer = Buffer.alloc(1_048_577);
+        let count = 0;
+        while (count < buffer.length) {
+          const { bytesRead } = await file.read(buffer, count, buffer.length - count, null);
+          if (bytesRead === 0) break;
+          count += bytesRead;
+        }
+        if (count === buffer.length) return null;
+        data = buffer.subarray(0, count).toString("utf8");
+      } finally { await file.close(); }
       return Object.fromEntries(data.split("\0").filter(entry => entry.includes("=")).map(entry => {
         const separator = entry.indexOf("=");
         return [entry.slice(0, separator), entry.slice(separator + 1)];
       }));
     }
     if (process.platform === "darwin") {
-      const ps = Bun.spawn(["/bin/ps", "-E", "-ww", "-p", String(pid), "-o", "command="], { stdout: "pipe", stderr: "ignore" });
-      const timer = setTimeout(() => ps.kill(), 3000);
-      try {
-        const text = await new Response(ps.stdout).text();
-        await ps.exited;
-        return Object.fromEntries([...text.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s*$)/g)].map(match => [match[1]!, match[2]!]));
-      } finally { clearTimeout(timer); }
+      const options = { encoding: "utf8" as const, timeout: 1500, killSignal: "SIGKILL" as const, maxBuffer: 1_048_576, windowsHide: true };
+      const [cmdResult, envResult] = await Promise.all([
+        run("/bin/ps", ["-ww", "-p", String(pid), "-o", "command="], options),
+        run("/bin/ps", ["-E", "-ww", "-p", String(pid), "-o", "command="], options),
+      ]);
+      const command = cmdResult.stdout.trimEnd();
+      const text = envResult.stdout;
+      if (!command || !text.startsWith(`${command} `)) return null;
+      const environment = text.slice(command.length);
+      return Object.fromEntries([...environment.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s*$)/g)].map(match => [match[1]!, match[2]!]));
     }
   } catch { /* Unreadable process identity is not a default profile. */ }
   return null;
@@ -183,11 +232,11 @@ async function hermesProcessEnvironment(pid: number): Promise<Record<string, str
 export function hermesRuntimeSession(home: string, processes: readonly HermesProcess[]): string | null {
   try {
     const file = join(home, "runtime", "active_sessions.json");
-    if (statSync(file).size > 1_048_576) return null;
-    const registry = JSON.parse(readFileSync(file, "utf8")) as { entries?: unknown };
+    const registry = JSON.parse(readHermesFile(file).toString("utf8")) as { entries?: unknown };
     if (!Array.isArray(registry.entries)) return null;
     const sessions = new Set<string>();
     for (const gateway of processes.filter(isTuiGateway)) {
+      if (!Number.isSafeInteger(gateway.pid) || gateway.pid <= 0) continue;
       const startedAt = processStartedAt(gateway.pid);
       if (startedAt === null) continue;
       for (const entry of registry.entries) {
@@ -196,6 +245,7 @@ export function hermesRuntimeSession(home: string, processes: readonly HermesPro
           || !Number.isFinite(entry.process_start_time) || Math.abs(entry.process_start_time * 1000 - startedAt) > (process.platform === "darwin" ? 1000 : 10)) continue;
         if (typeof entry.session_id === "string" && /^[\w:.-]{1,200}$/.test(entry.session_id)) sessions.add(entry.session_id);
       }
+      if (!sameProcessLifetime(gateway.pid, startedAt)) return null;
     }
     return sessions.size === 1 ? sessions.values().next().value! : null;
   } catch { return null; }
@@ -205,31 +255,50 @@ export function hermesRuntimeSession(home: string, processes: readonly HermesPro
 export async function paneHermesCommandContext(paneId: string, configuredHome?: string): Promise<HermesCommandContext | null> {
   const info = await herdrRpc<{ process_info?: { foreground_processes?: HermesProcess[] } }>("pane.process_info", { pane_id: paneId }).catch(() => null);
   const processes = info?.process_info?.foreground_processes ?? [];
-  const launcher = processes.find(isHermesProcess);
-  if (!launcher) return null;
-  const native = processes.find(isTuiGateway) ?? launcher;
+  const launchers = processes.filter(isHermesProcess);
+  const gateways = processes.filter(isTuiGateway);
+  if (launchers.length !== 1 || gateways.length > 1) return null;
+  const launcher = launchers[0]!;
+  const native = gateways[0] ?? launcher;
+  if (!Number.isSafeInteger(native.pid) || native.pid <= 0) return null;
   const startedAt = processStartedAt(native.pid);
+  const launcherStartedAt = native === launcher ? startedAt : processStartedAt(launcher.pid);
   const env = await hermesProcessEnvironment(native.pid);
-  if (startedAt === null || !env || !env.HOME || !isAbsolute(env.HOME)) return null;
+  if (startedAt === null || launcherStartedAt === null || !env || !env.HOME || !isAbsolute(env.HOME)) return null;
+  if (process.platform === "linux") {
+    try {
+      const nativeRoot = statSync(`/proc/${native.pid}/root`), bridgeRoot = statSync("/");
+      if (nativeRoot.dev !== bridgeRoot.dev || nativeRoot.ino !== bridgeRoot.ino
+        || readlinkSync(`/proc/${native.pid}/ns/mnt`) !== readlinkSync("/proc/self/ns/mnt")) return null;
+    } catch { return null; }
+  }
   let home = configuredHome ?? env.HERMES_HOME;
   const root = env.HERMES_HOME || join(env.HOME, ".hermes");
+  if (!isAbsolute(root)) return null;
   // /proc exposes exec-time environment, so an in-process profile override may
   // require a lifetime-bound breadcrumb rather than today's active_profile file.
   if (!configuredHome && (!home || existsSync(join(root, "active_profile")) || launcher.argv?.some(arg => arg === "--profile" || arg === "-p" || arg.startsWith("--profile=")))) {
     const candidates = [root];
     try {
-      for (const entry of readdirSync(join(root, "profiles"), { withFileTypes: true }).slice(0, 64)) {
-        if (entry.isDirectory()) candidates.push(join(root, "profiles", entry.name));
-      }
+      const profiles = opendirSync(join(root, "profiles"));
+      try {
+        let count = 0;
+        for (let entry = profiles.readSync(); entry !== null; entry = profiles.readSync()) {
+          if (++count > 64) return null;
+          if (entry.isDirectory()) candidates.push(join(root, "profiles", entry.name));
+        }
+      } finally { profiles.closeSync(); }
     } catch { /* No named profiles. */ }
     const terminal = hermesTerminalId(launcher.pid);
-    const launchTime = processStartedAt(launcher.pid);
     const matches = candidates.filter(candidate => hermesRuntimeSession(candidate, processes)
-      || (terminal && launchTime !== null && launcher.cwd && hermesBreadcrumbSession(candidate, terminal, launcher.cwd, launchTime)));
+      || (terminal && launcher.cwd && hermesBreadcrumbSession(candidate, terminal, launcher.cwd, launcherStartedAt)));
     home = matches.length === 1 ? matches[0] : undefined;
   }
   if (!home || !isAbsolute(home)) return null;
-  try { home = realpathSync(home); } catch { return null; }
+  try {
+    home = realpathSync(home);
+    if (!statSync(home).isDirectory()) return null;
+  } catch { return null; }
   const sources: string[] = [];
   for (const process of processes) for (const arg of process.argv ?? []) {
     if (/[\\/]ui-tui[\\/]dist[\\/]entry\.js$/.test(arg)) sources.push(dirname(dirname(dirname(arg))));
@@ -246,9 +315,9 @@ export async function paneHermesCommandContext(paneId: string, configuredHome?: 
   for (const source of new Set(sources)) {
     const features = hermesNativeFeatures(source);
     if (!features) continue;
-    if (processStartedAt(native.pid) !== startedAt && process.platform !== "darwin") return null;
+    if (!sameProcessLifetime(native.pid, startedAt) || !sameProcessLifetime(launcher.pid, launcherStartedAt)) return null;
     const filesystem = process.platform === "linux" ? `/proc/${native.pid}/root` : "/";
-    return { ...features, home, userHome: env.HOME, env,
+    return { ...features, home, userHome: env.HOME, env, cwd: native.cwd ?? launcher.cwd,
       docker: existsSync(join(filesystem, ".dockerenv")) || existsSync(join(filesystem, "run", ".containerenv")),
       s6: existsSync(join(filesystem, "run", "s6")) || existsSync(join(filesystem, "package", "admin", "s6-overlay")) };
   }
@@ -283,7 +352,7 @@ export function hermesBreadcrumbSession(home: string, terminalId: string, cwd: s
     const marker = join(home, "terminal-sessions", terminalId);
     const markerStat = statSync(marker);
     if (!markerStat.isFile() || markerStat.size > 8192) return null;
-    const data = JSON.parse(readFileSync(marker, "utf8")) as { session_id?: unknown; cwd?: unknown; ts?: unknown };
+    const data = JSON.parse(readHermesFile(marker, 8192).toString("utf8")) as { session_id?: unknown; cwd?: unknown; ts?: unknown };
     if (typeof data.session_id !== "string" || data.session_id.trim().length === 0) return null;
     if (typeof data.cwd !== "string" || realpathSync(data.cwd) !== realpathSync(cwd)) return null;
     if (typeof data.ts !== "number" || !Number.isFinite(data.ts) || data.ts * 1000 < startedAt - 1000) return null;

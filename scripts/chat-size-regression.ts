@@ -501,7 +501,7 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
           };
           listeners.add(check); check();
         });
-        const routed = queueScenario || scenario === "writes";
+        const routed = queueScenario || scenario === "writes" || scenario === "held";
         const recorded = async (): Promise<Frame[]> => {
           if (routed) return [...wire];
           assert.ok(page);
@@ -549,7 +549,7 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
         }
         page = await openRecording(browser, contexts, origin, scenario === "held" ? heldPane : first,
           { viewport: { width: 1000, height: 700 } }, { language: "en", defaultView: queueScenario ? "chat" : "terminal", releasePaneAway: true },
-          scenario === "mount", queueScenario || scenario === "writes" ? setup : undefined);
+          scenario === "mount", routed ? setup : undefined);
         if (scenario === "held") {
           await page.getByText("Another app has this pane open.", { exact: false }).waitFor();
           await pauseClock(page);
@@ -562,6 +562,8 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
           await page.locator(".terminal-banner", { hasText: "View only while you use another window" }).waitFor();
           assert.ok(holder);
           await stopHolder(holder);
+          // Input readiness must restore typing even while the new stream is delayed.
+          holdOutput = true;
           await page.evaluate(() => {
             Object.defineProperty(document, "hasFocus", { configurable: true, value: () => true });
             window.dispatchEvent(new Event("focus"));
@@ -573,9 +575,19 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
             "a fresh resume must clear the previous attach's held state");
           await page.clock.resume();
           await page.locator(".xterm-helper-textarea").focus();
-          await page.keyboard.type("z");
-          await page.waitForFunction(() => (window as unknown as { frames_: Frame[] }).frames_
-            .some((f) => f.dir === "out" && f.type === "input"), undefined, { timeout: 10_000 });
+          const typed = `held-resume-${crypto.randomUUID()}`;
+          await page.keyboard.type(typed);
+          await waitWire("out", "input");
+          const inputDeadline = Date.now() + 10_000;
+          let nativeText = "";
+          while (Date.now() < inputDeadline) {
+            nativeText = (await paneRead({ paneId: heldPane, source: "visible", format: "text" })).text.replace(/\s/g, "");
+            if (nativeText.includes(typed)) break;
+            await Bun.sleep(50);
+          }
+          assert.ok(nativeText.includes(typed), "typing after input-ready reaches the native pane before output is delivered");
+          holdOutput = false;
+          for (const send of heldOutput.splice(0)) send();
           console.log("PASS inactive attach lifecycle: held");
           continue;
         }

@@ -2241,27 +2241,33 @@ const HERMES_PAGER_HINT_RE = /^(?:↑↓\/jkline·Enter\/Space\/PgDnpage·b\/PgU
 
 /** Ink's informational pagers are read-only; each button sends one explicit native pager key. */
 function parseHermesPager(screen: string): ParsedPrompt | null {
-  const raw = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  const raw = screen.replace(ANSI_RE, "").split(/\r?\n/).map(line => line.replace(/\s+[┃│]\s*$/, ""));
   const top = findLastIndex(raw, line => /^\s*╔═+╗/.test(line));
   if (top < 0) return null;
   const bottom = raw.findIndex((line, index) => index > top && /^\s*╚═+╝/.test(line));
-  if (bottom < 0 || raw.slice(bottom + 1).filter(line => line.trim()).length > 2) return null;
+  if (bottom < 0) return null;
+  const topBorder = raw[top]!.match(/^(\s*╔═+╗)/);
+  const bottomBorder = raw[bottom]!.match(/^(\s*╚═+╝)/);
+  // Backdrop can remain beside an overlay; newer output below it invalidates the card.
+  if (!topBorder || !bottomBorder || topBorder[1]!.trim().length !== bottomBorder[1]!.trim().length
+    || !hermesTail(raw, bottom, false)) return null;
   const rows = raw.slice(top + 1, bottom);
   if (!rows.every(line => /^\s*║.*║/.test(line))) return null;
   const inner = rows.map(line => line.slice(line.indexOf("║") + 1, line.lastIndexOf("║")));
   const lines = inner.map(line => line.trim());
   const title = lines.findIndex(Boolean);
   if (title < 0 || !["Status", "Reload Skills", "Version", "Profile", "Review"].includes(lines[title]!)) return null;
-  const hint = lines.findIndex((line, index) => index > title && /^(?:↑|end)/.test(line) && [1, 2, 3, 4, 5, 6, 7, 8].some(span => HERMES_PAGER_HINT_RE.test(lines.slice(index, index + span).join("").replace(/\s+/g, ""))));
+  const hint = lines.findIndex((line, index) => index > title && /^(?:↑|end)/.test(line) && HERMES_PAGER_HINT_RE.test(lines.slice(index).join("").replace(/\s+/g, "")));
   if (hint < 0) return null;
   const bodyRows = inner.slice(title + 1, hint).map(line => line.trim());
   while (bodyRows.length > 0 && !bodyRows[0]!.trim()) bodyRows.shift();
   while (bodyRows.length > 0 && !bodyRows.at(-1)!.trim()) bodyRows.pop();
   const body = bodyRows.join("\n").trim();
-  const end = lines[hint]!.startsWith("end ·");
+  const end = lines[hint]!.startsWith("end");
+  const outputTitle = lines[title] === "Reload Skills" && /(?:^|\n)(?:❌\s*)?Skills reload failed: .+/.test(body) ? "Reload Skills failed" : lines[title]!;
   const options = end ? ["Previous page", "Close"] : ["Previous page", "Next page", "Close"];
   return finishPrompt("hermes", {
-    kind: "menu", title: lines[title]!, question: "Native terminal output", body,
+    kind: "menu", title: outputTitle, question: "Native terminal output", body,
     options: options.map(label => ({ label, description: null })), multi_select: false, custom_option_index: null,
   }, { responder: "hermes-pager", menuLabels: options, selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
     optionSteps: (end ? ["pageup", KEY.escape] : ["pageup", "pagedown", KEY.escape]).map(key => keySteps([key])) });
@@ -2278,13 +2284,13 @@ function hermesOutputPrompt(title: string, body: string): ParsedPrompt {
 function parseHermesHelp(screen: string, sent: string | null): ParsedPrompt | null {
   if (sent?.trim() !== "/help") return null;
   const raw = screen.replace(ANSI_RE, "").split(/\r?\n/);
-  const lines = raw.map(cleanLine);
+  const lines = raw.map(line => cleanLine(line.replace(/\s+┃\s*$/, "")));
   const title = findLastIndex(lines, line => line === "(^_^)? Commands");
   const hotkeys = findLastIndex(lines, line => line === "Hotkeys");
   let start = title >= 0 ? title : hotkeys;
   if (title < 0) while (start > 0 && /^\s*│/.test(raw[start - 1]!)) start -= 1;
   if (start < 0) return null;
-  const end = lines.findIndex((line, index) => index > start && /^╰[─━]+(?:╯|\s*┃)$/.test(line));
+  const end = raw.findIndex((line, index) => index > start && /^╰[─━]+(?:╯(?:\s*┃)?|\s*┃)$/.test(cleanLine(line)));
   if (end < 0 || !lines.slice(start + 1, end).some(line => /\/help|Ctrl|ctrl|Enter|Tab/.test(line))) return null;
   const tail = lines.slice(end + 1).filter(Boolean);
   if (!tail.some(line => /^─?\s*ready\b/.test(line)) || !tail.every(line => /^─?\s*ready\b|^❯(?:\s+Try ".*")?$/.test(line))) return null;
@@ -2300,7 +2306,7 @@ function parseHermesInkOutput(screen: string, sent: string | null): ParsedPrompt
   const unchromed = rawLines.map(line => line.replace(/\s*[┃│]$/, ""));
   const lines = unchromed.map(cleanLine);
   const input = findLastIndex(lines, line => /^❯(?:\s.*)?$/.test(line));
-  if (input < 0) return null;
+  if (input < 0 || lines.slice(input + 1).some(Boolean)) return null;
   const footer = findLastIndex(lines.slice(0, input), line => /^─?\s*ready\b/.test(line));
   if (footer < 0 || lines.slice(footer + 1, input).some(Boolean)) return null;
   const output = lines.slice(0, footer);
@@ -2343,12 +2349,12 @@ function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPr
   const trimmedSent = sent?.trim() ?? "";
   const command = trimmedSent.replace(/^\/reload_skills$/, "/reload-skills").replace(/^\/v$/, "/version");
   const baseCommand = command.split(/\s+/)[0] ?? "";
-  if (baseCommand !== "/help" && baseCommand !== "/status" && baseCommand !== "/reload-skills" && baseCommand !== "/version"
+  if (!["/help", "/status", "/reload-skills", "/version"].includes(command)
     && baseCommand !== "/profile" && baseCommand !== "/review") return null;
   const rawLines = screen.replace(ANSI_RE, "").split(/\r?\n/);
   const lines = rawLines.map(cleanLine);
   const input = findLastIndex(lines, line => /^(?:[\w.-]+\s+)?❯(?:\s.*)?$/.test(line));
-  if (input < 0) return null;
+  if (input < 0 || lines.slice(input + 1).some(line => line && !isDivider(line))) return null;
   const footer = findLastIndex(lines.slice(0, input), line => /^[⚕☤]\s.+│/.test(line));
   if (footer < 0 || lines.slice(footer + 1, input).some(line => line && !isDivider(line))) return null;
   const output = lines.slice(0, footer);
@@ -2358,12 +2364,18 @@ function parseHermesClassicOutput(screen: string, sent: string | null): ParsedPr
     if (echo < 0) return null;
     const echoCmd = output[echo]!.replace(/^(?:⚙️?\s*)?/, "").trim();
     if (echoCmd.replace(/\s+/g, " ") !== command.replace(/\s+/g, " ")) return null;
-    const profileIndex = output.findIndex((line, index) => index > echo && /^Profile:\s*\S+/.test(line));
-    const homeIndex = output.findIndex((line, index) => index > profileIndex && /^Home:\s*\S+/.test(line));
-    if (profileIndex < 0 || homeIndex < 0 || homeIndex !== profileIndex + 1) return null;
-    if (output.slice(echo + 1, profileIndex).some(Boolean)) return null;
-    if (output.slice(homeIndex + 1).some(Boolean)) return null;
-    return hermesOutputPrompt("Profile", output.slice(profileIndex, homeIndex + 1).join("\n").trim());
+    const profileIndex = findLastIndex(output, line => /^Profile:\s*\S+/.test(line));
+    if (profileIndex < 0) return null;
+    let homeIndex = profileIndex + 1;
+    while (homeIndex < output.length && (!output[homeIndex] || homeIndex === echo)) homeIndex += 1;
+    if (homeIndex >= output.length || !/^Home:\s*\S+/.test(output[homeIndex]!)) return null;
+    // Native redraws can place the echo after profile output. A preceding profile
+    // echo makes that ordering ambiguous with an earlier completed invocation.
+    if (echo > profileIndex && output.some((line, index) => index < profileIndex && /^(?:⚙️?\s*)?\/profile(?:\s+\S+)?$/.test(line))) return null;
+    for (let index = Math.min(echo, profileIndex); index < output.length; index += 1) {
+      if (index !== echo && index !== profileIndex && index !== homeIndex && output[index]) return null;
+    }
+    return hermesOutputPrompt("Profile", `${output[profileIndex]}\n${output[homeIndex]}`);
   }
 
   if (baseCommand === "/review") {
@@ -2419,6 +2431,15 @@ const HERMES_CLASSIC_APPROVAL_HINT = /^↑\/↓ to select, Enter to confirm\s+\(
 const HERMES_TUI_APPROVAL_HINT = /^↑\/↓ select · Enter confirm · 1-(\d) quick pick · (?:Esc\/)?Ctrl\+C deny$/;
 const HERMES_TRUNCATED_RE = /…|\(command truncated|\(description truncated|\(detail truncated/;
 const HERMES_TOOL_PROGRESS_RE = /^(?:✍️?|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|[\u2800-\u28ff]|⚡|⚙️)\s+(\S.*?)(?:\s+\(?\s*(?:\d+m\s*)?\d+(?:\.\d+)?s(?:\s*·\s*↓\s*\d+\s*tok)?\))?$/;
+
+/** An unreadable native approval or pager must not regain Enter through generic fallback. */
+function hermesNeedsTerminal(screen: string): boolean {
+  const plain = screen.replace(ANSI_RE, "");
+  return /Dangerous Command|⚠️?[^\n]* required ·|↑\/↓ to select, Enter to confirm|↑\/↓ select · Enter confirm · 1-/.test(plain)
+    || /^\s*║\s*(?:Status|Reload Skills|Version|Profile|Review|Diff|Context)\s*║/m.test(plain)
+    || /Esc\/q\s+close\s*\(/.test(plain);
+}
+
 /** Only native chrome may follow the panel. */
 function hermesTail(lines: string[], end: number, classic: boolean): boolean {
   const tail = lines.slice(end + 1).map((line) => line.replace(ANSI_RE, "").trim().replace(/^[│║]\s?/, "").replace(/\s?[│║]$/, "").trim()).filter(Boolean);
@@ -2452,7 +2473,8 @@ function parseHermesPrompt(screen: string): ParsedPrompt | null {
   if (start < 0) return null;
   const classic = raw[start]!.trim().startsWith("╭");
   const end = raw.findIndex((line, index) => index > start && (classic ? /^\s*╰─+╯\s*$/ : /^\s*╚═+╝\s*$/).test(line));
-  if (end < 0 || raw.slice(start + 1, end).some((line) => !(classic ? /^\s*│.*│\s*$/ : /^\s*║.*║\s*$/).test(line))) return null;
+  if (end < 0 || raw[start]!.trim().length !== raw[end]!.trim().length
+    || raw.slice(start + 1, end).some((line) => !(classic ? /^\s*│.*│\s*$/ : /^\s*║.*║\s*$/).test(line))) return null;
   const panel = raw.slice(start + 1, end).map((line) => line.replace(ANSI_RE, "").trim().replace(/^[│║]\s?/, "").replace(/\s?[│║]$/, "").trim());
   // Remove only the renderer's border padding. Leading whitespace in a multiline shell
   // command can be meaningful and must not collide with an otherwise identical command.
@@ -2502,8 +2524,13 @@ function parseHermesPrompt(screen: string): ParsedPrompt | null {
   const order = rows.map((row) => allowed.indexOf(row.label));
   if (order.some((value, index) => index > 0 && value <= order[index - 1]!)) return null;
   if (!classic && Number(HERMES_TUI_APPROVAL_HINT.exec(hint ?? "")?.[1]) !== rows.length) return null;
+  // Classic can omit the description entirely when vertical space runs out.
+  if (classic && !panel.slice(last + 1, footer).some(Boolean)) return null;
 
-  const body = [...content.slice(1, first), ...content.slice(last + 1, footer)].filter((line) => line.trim()).join("\n");
+  const bodyRows = [...content.slice(1, first), ...content.slice(last + 1, footer)];
+  while (bodyRows.length > 0 && !bodyRows[0]!.trim()) bodyRows.shift();
+  while (bodyRows.length > 0 && !bodyRows.at(-1)!.trim()) bodyRows.pop();
+  let body = bodyRows.join("\n");
 
   let stableTarget: string | undefined;
   if (classic) {
@@ -2513,7 +2540,9 @@ function parseHermesPrompt(screen: string): ParsedPrompt | null {
       if (match) {
         stableTarget = match[1]!.trim();
         const targetFile = stableTarget.split("/").pop() ?? stableTarget;
-        if (!body.includes(targetFile) && !body.includes(stableTarget)) return null;
+        const targets: string[] = body.match(/[^\s<>"'`,;:()]+/g) ?? [];
+        if (!targets.includes(targetFile) && !targets.includes(stableTarget)) return null;
+        if (!body.includes(stableTarget)) body += `\n\nTarget: ${stableTarget}`;
       }
     }
   }
@@ -3445,9 +3474,10 @@ async function readKnownPrompt(
   if (agent === "hermes") {
     if (pane.agent_status === "working") hermesAnswered.delete(paneId);
     else if (hermesAnswered.has(paneId)) {
-      if (contentId(prompt) === hermesAnswered.get(paneId)) return { prompt: null, screen, suppressed: true };
+      if (contentId(prompt) === hermesAnswered.get(paneId) || (prompt === null && hermesNeedsTerminal(screen))) return { prompt: null, screen, suppressed: true };
       hermesAnswered.delete(paneId);
     }
+    if (prompt === null && hermesNeedsTerminal(screen)) return { prompt: null, screen, suppressed: true };
   }
   if (prompt && await claudeHeldIsGrey(paneId, prompt)) return { prompt: null, screen };
   if (!prompt && agent === "gjc") {
@@ -3764,7 +3794,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           // keys to the agent's own prompt, where an arrow walks the prompt's history: each move
           // after the first goes only once the list shows the one before it
           // GJC's selector the same: dismissed under the answer, its composer would take the moves
-        if (move && walked && (list || responder.startsWith("hermes-") || responder === "fallback-gjc-menu") && !(await onRow())) return promptChanged();
+          if (move && walked && (list || responder.startsWith("hermes-") || responder === "fallback-gjc-menu") && !(await onRow())) return promptChanged();
           if (!move && !committed) {
             // An answer is only as good as the menu and the cursor it moves from, and both are
             // as old as the read above by the time its moves are done: the menu answered in the

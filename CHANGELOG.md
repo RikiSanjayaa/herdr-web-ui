@@ -15,11 +15,20 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   than the expanded instructions; native storage and model input stay unchanged.
   Resolved panes also offer `/help`, `/status`, `/reload-skills` and `/version` as terminal-backed cards:
   visible output with a key-free dismiss action, and explicit navigation and close for Ink's
-  informational pagers. Successful skill reloads refresh that pane's Chat suggestions immediately.
+  informational pagers. A visible native reload completion refreshes that pane's Chat suggestions.
+  Native transcript scrollbars and inline footers do not hide otherwise complete informational cards.
   `/profile` shows its native result with the same controls. `/plan`, `/init` and `/review` use
-  native execution and transcript persistence;
-  recognized approval cards preserve warnings and explicit consent for protected instruction files.
+  native execution and transcript persistence, unlike the transient informational cards.
+  Recognized approval cards preserve warnings and explicit consent for protected instruction files;
+  unknown menus still require Terminal. `/diff` and `/context` remain outside this Chat command scope.
   ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)
+- **Settings → Phone & devices → Portal** gives this PC a public HTTPS address through
+  [Portal](https://github.com/gosuda/portal-tunnel), with no account and no domain of your own.
+  With Portal v2.6.1 or later installed, **Start** runs it on a relay you enter, dropping any
+  `Tailscale-User-Login` header a visitor sends; it starts only with `HERDR_WEB_TOKEN` set. The
+  address and its QR code show on every signed-in device, any device that can type into your
+  terminals can stop it, and an address left on comes back when the app restarts.
+  ([#746](https://github.com/devswha/herdr-web-ui/pull/746) by @rabbitson87)
 - **Two tabs side by side** on a desktop, from different workspaces or PCs: drag a tab down out
   of its strip, or a sidebar row over the pane area, and drop it on the left or right half. A guide
   shows the two halves as soon as the drag starts and keeps its side steady at the centre; Escape
@@ -64,6 +73,11 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   ([#606](https://github.com/devswha/herdr-web-ui/pull/606) by @sobir-git)
 
 ### Changed
+- Install and update counts include app setting values such as theme, text size and notification
+  choices, rather than only the names of changed appearance settings. Custom text and account
+  identifiers stay out; custom choices use flags or counts. The expanded notice is shown again
+  before sending, and existing opt-outs and install/update-only delivery stay unchanged.
+  ([#866](https://github.com/devswha/herdr-web-ui/pull/866))
 - Markdown file previews are parsed in a worker with a 2 s budget and a 60 000-element limit,
   keeping the existing HTML blocks, images and reader-page navigation. A preview that cannot
   be drawn offers its source. Partial text and preview, highlighting or line-number limits are
@@ -77,6 +91,29 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   ([#860](https://github.com/devswha/herdr-web-ui/pull/860))
 
 ### Fixed
+- Hermes `/profile` result cards handle native redraws that place the command echo inside or
+  after the result. Ambiguous earlier results still remain in Terminal.
+  ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)
+- Markdown avoids building delimiter scanners for plain text inside emphasis and links,
+  reducing repeated allocations in large responses without changing the parsed content.
+  ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)
+- A displaced terminal attachment holds herdr's takeover diagnostic for the existing refusal
+  deadline, so a delayed process exit can confirm and discard it before it reaches the pane.
+  ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)
+- First-device pairing waits for the browser to return its device cookie before restricting
+  access. A proxy that drops the cookie no longer locks out an otherwise open installation;
+  Settings reports the failed pairing instead. Already restricted installations stay restricted.
+  ([#915](https://github.com/devswha/herdr-web-ui/pull/915))
+- A message another Claude Code session sends into a pane (its `peer` messages) shows in the chat as
+  a folded **Message from another session: {name}** that opens its own turn, instead of being skipped so the work it
+  started was appended to the answer before it.
+- Attached files upload three at a time instead of one after another, and each file's `@path` goes
+  to the start of the message in the order the files were picked, once a `/command` being typed or
+  an IME composition is finished. It used to go where the caret
+  was, so a path that arrived while you typed landed in the middle of your words and moved the caret.
+- One paste, pick or drop attaches up to 20 files instead of silently keeping the first four, and
+  the message box says how many it left out. **Settings → Chat → Files at once** sets the number
+  for the device, from 1 to 50.
 - Web UI SSH connections no longer open extra tunnels configured in the account’s SSH config.
   ([#606](https://github.com/devswha/herdr-web-ui/pull/606) by @sobir-git)
 - **Send now** on a working Codex pane sends the message at once. Codex kept it until its next
@@ -84,6 +121,10 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   itself offers to interrupt the turn and send it. An ordinary Send and the automatic next-turn
   delivery never interrupt Codex.
   ([#783](https://github.com/devswha/herdr-web-ui/pull/783) by @kilhyeonjun)
+- On Windows, a pane that runs a launcher which starts OmO as its child is recognized as OmO. herdr
+  names only the launcher there, so the bridge now also looks for OmO below the pane's shell in the
+  PC's process table, so its chat and session are found. Only processes below that pane's own
+  shell count. ([#886](https://github.com/devswha/herdr-web-ui/pull/886) by @willowite)
 
 ## [0.4.8] - 2026-10-12
 
@@ -187,6 +228,7 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   start or length (Claude, Codex, Grok), from 5% of the window on.
   ([#513](https://github.com/devswha/herdr-web-ui/pull/513) by @kilhyeonjun, [#834](https://github.com/devswha/herdr-web-ui/pull/834))
 - Turkish (Türkçe) UI translation: a full `i18n.tr.ts` dictionary, the language in the Settings menu with browser detection, and a Turkish README. ([#815](https://github.com/devswha/herdr-web-ui/pull/815) by @fitzgpt)
+- Configurable paging shortcuts scroll the current chat transcript or native terminal history with Mod+Shift+PageUp/PageDown and 0–100 lines of overlap (one by default). Settings → Chat can opt into plain PageUp/PageDown while composing, preserving the draft, selection and focus. When herdr explicitly reports no native history, a paging action sends plain page keys to the running application, which controls its own page length. ([#811](https://github.com/devswha/herdr-web-ui/pull/811) by @kratam)
 - Native conversation transcripts for Hermes Agent: turns, thinking blocks, and tool calls are read directly from its SQLite session store. ([#604](https://github.com/devswha/herdr-web-ui/pull/604) by @RikiSanjayaa)
   A remote PC reads them once its bridge is updated to this release's runtime.
 - **Deep links.** The address now says where you are, and opens there: the PC, the workspace (by id and a short slug of its name, so `?ws=w2K-herdr-web-ui&pane=w2K:p1&view=chat` reads like the place), the pane and its lens, an open file, a Settings page and group (`&settings=about&section=updates`), the New workspace dialog with its fields filled (`?new=workspace&cwd=…&name=…&agent=…`; a link never creates anything), and a collapsed sidebar (`&sidebar=hidden`). Opening another pane is a history entry, so Back returns to the last one. A link to a pane that has closed opens its workspace, a link to nothing open says so, and **Copy link** in the header's More menu copies the address on a phone.

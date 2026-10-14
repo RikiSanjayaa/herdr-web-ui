@@ -40,7 +40,7 @@ import { useShortcuts } from "./lib/shortcuts.ts";
 import { useMediaQuery } from "./lib/useMediaQuery.ts";
 import { PaneLenses } from "./lib/paneLens.ts";
 import { paneContextPress } from "./lib/paneCanvas.ts";
-import type { AppActions, PaneView } from "./lib/actions.ts";
+import type { AppActions, PaneView, PaneControls } from "./lib/actions.ts";
 import {
   notificationState,
   requestNotificationPermission,
@@ -316,6 +316,7 @@ export function App() {
   // a tab dragged out of its strip (lib/paneDrag.ts)
   const tabDrag = useSyncExternalStore(paneDrag.subscribe, paneDrag.snapshot);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const paneControls = useRef<PaneControls | null>(null);
   const [findRequest, setFindRequest] = useState<{ paneId: string | null; serial: number }>({ paneId: null, serial: 0 });
   // the header's More menu: its button, and whether it opened on a phone-width screen
   const [more, setMore] = useState<{ anchor: HTMLElement; phone: boolean } | null>(null);
@@ -1140,6 +1141,7 @@ export function App() {
       },
       setView,
       toggleView: () => setView(view === "chat" ? "terminal" : "chat"),
+      scrollPage: (direction) => paneControls.current?.scrollPage(direction),
       openNewSession: () => {
         setDrawerOpen(false);
         setNewSessionMachineId(selectedMachineId);
@@ -1543,6 +1545,8 @@ export function App() {
                         view={item ? lensOf(item) : slotView}
                         // the other half never takes the keyboard: a press in it makes it active first
                         active={active && itemActive}
+                        // the paging shortcuts reach the selected pane of the active half only
+                        controls={active && itemActive ? paneControls : undefined}
                         findRequest={active && findRequest.paneId === item?.pane_id ? findRequest.serial : 0}
                         autoSelected={active ? autoSelected : true}
                         terminalFontSize={settings.terminalFontSize}

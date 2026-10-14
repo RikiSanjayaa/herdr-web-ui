@@ -831,22 +831,26 @@ export function matchCodexTranscript(screen: string, candidates: { path: string;
   return matching.size === 1 ? [...matching][0]! : null;
 }
 
-/**
- * A text cut at its markdown link targets: each stretch of text with the target that follows it
- * ("" after the last). A scan, not a split at /\]\([^)\s]*\)/: that rescans to the end of the
- * text from every "](" no ")" closes, quadratic in a text full of them.
- */
-function cutAtLinkTargets(text: string): { text: string; target: string }[] {
-  const pieces: { text: string; target: string }[] = [];
-  let start = 0;
+/** Link target boundaries, scanned once even when many openings have no closing parenthesis. */
+function* linkTargets(text: string): Generator<{ at: number; end: number }> {
   let search = 0;
   for (let at = text.indexOf("](", search); at >= 0; at = text.indexOf("](", search)) {
     let end = at + 2;
     while (end < text.length && text[end] !== ")" && !/\s/.test(text[end]!)) end++;
     // unclosed: no "](" before `end` is closed either, so all of it stays text
     if (text[end] !== ")") { search = end; continue; }
+    yield { at, end };
+    search = end + 1;
+  }
+}
+
+/** Each stretch of text with the markdown link target that follows it ("" after the last). */
+function cutAtLinkTargets(text: string): { text: string; target: string }[] {
+  const pieces: { text: string; target: string }[] = [];
+  let start = 0;
+  for (const { at, end } of linkTargets(text)) {
     pieces.push({ text: text.slice(start, at), target: text.slice(at + 2, end) });
-    start = search = end + 1;
+    start = end + 1;
   }
   pieces.push({ text: text.slice(start), target: "" });
   return pieces;
@@ -858,7 +862,7 @@ function cutAtLinkTargets(text: string): { text: string; target: string }[] {
  * own way, so the answer is not one run of text there, and its pieces alone are short common words.
  */
 function shownAnswer(text: string): string | null {
-  return cutAtLinkTargets(text).length > 1 ? null : normalizeDisplay(text).slice(-160);
+  return !linkTargets(text).next().done ? null : normalizeDisplay(text).slice(-160);
 }
 
 /**
@@ -897,12 +901,22 @@ export function matchShortCodexAnswers(screen: string, candidates: { path: strin
   if (candidates.some((candidate) => candidate.cut)) return null;
   const lastHeader = screen.lastIndexOf("OpenAI Codex (v");
   const display = normalizeDisplay(lastHeader >= 0 ? screen.slice(lastHeader) : screen);
-  // every turn of what was read, not the newest 100: an answer said long ago is said
-  const answers = candidates.map((candidate) => parseCodexTranscript(candidate.text, Infinity).filter((turn) => turn.role === "assistant")
-    .flatMap((turn) => turn.parts).flatMap((part) => part.kind === "text" ? [part.text] : []));
+  // Identical rollout bytes can belong to different sessions. Reuse their parsing and
+  // display work only within this call; keep every candidate below to reject ambiguity.
+  const parsed = new Map<string, { answers: string[]; shown: string[] | null }>();
+  const answers = candidates.map((candidate) => {
+    const known = parsed.get(candidate.text);
+    if (known !== undefined) return known;
+    // Every turn of what was read, not the newest 100: an answer said long ago is said.
+    const prose = parseCodexTranscript(candidate.text, Infinity).filter((turn) => turn.role === "assistant")
+      .flatMap((turn) => turn.parts).flatMap((part) => part.kind === "text" ? [part.text] : []);
+    const own = { answers: prose, shown: newestAnswersShown(display, prose) };
+    parsed.set(candidate.text, own);
+    return own;
+  });
   let found: { index: number; shown: string[] } | null = null;
   for (const [index, own] of answers.entries()) {
-    const shown = newestAnswersShown(display, own);
+    const shown = own.shown;
     if (shown === null) continue;
     if (found !== null) return null;
     found = { index, shown };
@@ -911,13 +925,13 @@ export function matchShortCodexAnswers(screen: string, candidates: { path: strin
   const { index: only, shown } = found;
   for (const [index, other] of answers.entries()) {
     if (index === only) continue;
-    const said = normalizeDisplay(other.join("\n"));
+    const said = normalizeDisplay(other.answers.join("\n"));
     if (shown.some((answer) => said.includes(answer))) return null;
     // an answer of the other with links shows as its text around them, the targets Codex's own
     // way: when that text is all in a shown answer, in order, the screen may be showing the other
     // every such answer of what was read, however short its text or many its links: one left
     // unchecked is one the screen may be showing
-    for (const text of other) {
+    for (const text of other.answers) {
       const pieces = cutAtLinkTargets(text);
       if (pieces.length < 2) continue;
       const around = pieces.map((piece) => normalizeDisplay(piece.text)).filter((piece) => piece !== "");

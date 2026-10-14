@@ -32,7 +32,7 @@ import {
   type DraftRefusal,
   formatTokens,
   imageMention,
-  insertMention,
+  insertLeadingMention,
   MAX_COMPOSER_CHARS,
   rankSlashCommands,
   submitNote,
@@ -66,8 +66,8 @@ export interface ComposerProps {
   backgroundWait?: boolean;
   metadata?: ConversationMetadata | null;
   cwd?: string | null;
-  /** A confirmed native reload result is visible; refetch this pane's command inventory. */
-  skillsReloaded?: boolean;
+  /** A successful native reload's prompt ID; null means no visible completion, not invalidation. */
+  skillsReloaded?: string | null;
   /** replaces the placeholder: how a message answers the agent's waiting prompt */
   answerHint?: string | null;
   /** what the agent suggests typing next (Claude's grey input text): the placeholder, taken with Tab */
@@ -84,7 +84,7 @@ export interface ComposerProps {
   onUploadImage: (file: File) => Promise<string>;
 }
 
-const MAX_IMAGES_PER_ACTION = 4;
+const UPLOADS_AT_ONCE = 3;
 /**
  * Any file can be attached (an icon, a PDF, a log): the server stores it beside the pane
  * and the message mentions its path. These image types also get a thumbnail.
@@ -109,7 +109,7 @@ export const SOURCE_LABEL: Record<SlashCommand["source"], string> = {
   plugin: "Plugins",
 };
 
-type CommandCacheEntry = { loadedAt: number; commands: SlashCommand[]; agent?: string | null; cwd?: string | null };
+type CommandCacheEntry = { loadedAt: number; commands: SlashCommand[]; agent: string | null; cwd: string | null };
 const commandCache = new Map<string, CommandCacheEntry>();
 
 const commandRequests = new Map<string, object>();
@@ -121,6 +121,8 @@ type Attachment = {
   previewUrl: string;
   path: string | null;
   state: "uploading" | "ready" | "error";
+  /** what the pick this file came in with left out, repeated beside an upload error of the batch */
+  leftOut: string | null;
 };
 
 function readSlashUsage(): Record<string, number> {
@@ -164,8 +166,8 @@ async function cachedPaneCommands(
   paneId: string,
   machineId: string,
   fetchCommands: (pane: string) => Promise<SlashCommand[]>,
-  agent?: string | null,
-  cwd?: string | null,
+  agent: string | null,
+  cwd: string | null,
   refresh = false,
 ): Promise<SlashCommand[]> {
   const key = paneStorageId(machineId, paneId);
@@ -174,8 +176,8 @@ async function cachedPaneCommands(
   if (
     cached &&
     Date.now() - cached.loadedAt < COMMAND_CACHE_MS &&
-    cached.agent === (agent ?? null) &&
-    (cwd === undefined || cached.cwd === (cwd ?? null))
+    cached.agent === agent &&
+    cached.cwd === cwd
   ) {
     return cached.commands;
   }
@@ -184,7 +186,7 @@ async function cachedPaneCommands(
   try {
     const commands = await fetchCommands(paneId);
     // A pre-reload read must not replace the inventory fetched after reload completed.
-    if (commandRequests.get(key) === request) commandCache.set(key, { loadedAt: Date.now(), commands, agent: agent ?? null, cwd: cwd ?? null });
+    if (commandRequests.get(key) === request) commandCache.set(key, { loadedAt: Date.now(), commands, agent, cwd });
     return commands;
   } finally {
     if (commandRequests.get(key) === request) commandRequests.delete(key);
@@ -258,7 +260,7 @@ export function Composer({
   backgroundWait = false,
   metadata,
   cwd = null,
-  skillsReloaded = false,
+  skillsReloaded = null,
   answerHint = null,
   suggestion = null,
   restored = null,
@@ -307,6 +309,13 @@ export function Composer({
   /** the restored text the box was filled with: only that fill is ever cleared, never the user's own typing */
   const filledFrom = useRef<string | null>(null);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
+  // Dismissing a completion must not cancel its inventory read or start another one.
+  const [commandReload, setCommandReload] = useState(() => ({ paneId, machineId, agent, cwd, id: skillsReloaded }));
+  if (commandReload.paneId !== paneId || commandReload.machineId !== machineId || commandReload.agent !== agent || commandReload.cwd !== cwd) {
+    setCommandReload({ paneId, machineId, agent, cwd, id: skillsReloaded });
+  } else if (skillsReloaded !== null && commandReload.id !== skillsReloaded) {
+    setCommandReload({ ...commandReload, id: skillsReloaded });
+  }
   const [files, setFiles] = useState<string[]>([]);
   const [slashUsage, setSlashUsage] = useState<Record<string, number>>(readSlashUsage);
   const [storedIndex, setSelectedIndex] = useState(0);
@@ -365,9 +374,17 @@ export function Composer({
     filledFrom.current = null;
   }, [restored]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const key = paneStorageId(machineId, paneId);
+    // Another agent or directory must not retain the previous inventory while its read waits.
+    setCommands([]);
+    if (!connected) {
+      commandCache.delete(key);
+      commandRequests.delete(key);
+      return;
+    }
     let live = true;
-    void cachedPaneCommands(paneId, machineId, fetchPaneCommands, agent, cwd, skillsReloaded)
+    void cachedPaneCommands(paneId, machineId, fetchPaneCommands, agent, cwd, commandReload.id !== null)
       .then((next) => {
         if (live) setCommands(next);
       })
@@ -376,8 +393,10 @@ export function Composer({
       });
     return () => {
       live = false;
+      // A read from before a disconnect or scope change cannot refill the shared cache.
+      commandRequests.delete(key);
     };
-  }, [paneId, machineId, agent, cwd, skillsReloaded]);
+  }, [paneId, machineId, agent, cwd, commandReload.id, connected, fetchPaneCommands]);
 
   useEffect(() => {
     const request = ++fileRequest.current;
@@ -405,6 +424,9 @@ export function Composer({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      // files not yet sent and paths not yet placed go with the pane
+      uploadQueue.current = [];
+      waitingMentions.current = [];
       for (const attachment of attachmentsRef.current) URL.revokeObjectURL(attachment.previewUrl);
     };
   }, []);
@@ -641,18 +663,62 @@ export function Composer({
     if (activeRef.current) element.focus();
   }, []);
 
-  const insertMentionAtCursor = useCallback(
-    (mention: string) => {
-      const element = textareaRef.current;
-      const currentText = textRef.current;
-      const selectionIsCurrent = element?.value === currentText;
-      const start = selectionIsCurrent ? (element.selectionStart ?? caretRef.current) : caretRef.current;
-      const end = selectionIsCurrent ? (element.selectionEnd ?? start) : start;
-      const next = insertMention(currentText, start, end, mention);
-      setTextAndCaret(next.text, next.caret);
-    },
-    [setTextAndCaret],
-  );
+  // an upload finishes while the user may be typing: its mention goes to the start (insertLeadingMention),
+  // and the caret and selection only move along with the text they sit in, without taking focus
+  // `false` when the message has no room for the whole mention: nothing is written then
+  const insertMentionAtStart = useCallback((mention: string, earlier: readonly string[]): boolean => {
+    const element = textareaRef.current;
+    const currentText = textRef.current;
+    const selectionIsCurrent = element?.value === currentText;
+    const start = selectionIsCurrent ? (element.selectionStart ?? caretRef.current) : caretRef.current;
+    const end = selectionIsCurrent ? (element.selectionEnd ?? start) : start;
+    const direction = selectionIsCurrent ? (element.selectionDirection ?? undefined) : undefined;
+    const next = insertLeadingMention(currentText, mention, earlier);
+    if (next.length === 0) return false;
+    const moved = (position: number) => (position >= next.at ? position + next.length : position);
+    textRef.current = next.text;
+    caretRef.current = moved(start);
+    flushSync(() => {
+      setText(next.text);
+      setCaret(moved(start));
+    });
+    if (element) element.setSelectionRange(moved(start), moved(end), direction);
+    return true;
+  }, []);
+
+  // one queue for the whole box: a pick made while another uploads waits its turn
+  const uploadQueue = useRef<Attachment[]>([]);
+  const uploadsRunning = useRef(0);
+  /** paths placed so far, by attachment id: ids follow pick order */
+  const placedMentions = useRef(new Map<number, string>());
+  /** finished uploads whose paths wait for a /command or an IME composition to end */
+  const waitingMentions = useRef<{ id: number; path: string }[]>([]);
+
+  const placeWaitingMentions = useCallback(() => {
+    if (waitingMentions.current.length === 0) return;
+    if (composingRef.current || /^\/\S*$/u.test(textRef.current)) return;
+    const waiting = waitingMentions.current.sort((a, b) => a.id - b.id);
+    waitingMentions.current = [];
+    for (const [index, { id, path }] of waiting.entries()) {
+      if (removedAttachments.current.has(id)) continue;
+      const mention = imageMention(path);
+      const earlier = [...placedMentions.current].filter(([placed]) => placed < id).map(([, placed]) => placed);
+      // no room for the whole path: this attachment and the ones picked after it stay uploading, in
+      // their order, Send stays off, and the next edit of the text tries again (the effect below);
+      // a cut path would name a file that is not there
+      if (!insertMentionAtStart(mention, earlier)) { waitingMentions.current.push(...waiting.slice(index)); break; }
+      placedMentions.current.set(id, mention);
+      setAttachments((current) => current.map((item) => (item.id === id ? { ...item, path, state: "ready" } : item)));
+    }
+  }, [insertMentionAtStart]);
+
+  // whatever wrote the text (typing, a completion, dictation, a cleared draft), a waiting path tries
+  // again in the next frame, after that write's own caret placement has landed
+  useEffect(() => {
+    if (waitingMentions.current.length === 0) return;
+    const frame = requestAnimationFrame(placeWaitingMentions);
+    return () => cancelAnimationFrame(frame);
+  }, [placeWaitingMentions, text]);
 
   const selectCompletion = useCallback(
     (choice: SlashCommand | string, currentTrigger: ActiveTrigger) => {
@@ -676,46 +742,63 @@ export function Composer({
     [setTextAndCaret, text],
   );
 
+  const pumpUploads = useCallback(() => {
+    // a few at a time: each upload holds its file as base64 until it is sent
+    while (mounted.current && uploadsRunning.current < UPLOADS_AT_ONCE && uploadQueue.current.length > 0) {
+      const attachment = uploadQueue.current.shift()!;
+      if (removedAttachments.current.has(attachment.id)) continue;
+      uploadsRunning.current += 1;
+      void onUploadImage(attachment.file)
+        .then(
+          (path) => {
+            if (!mounted.current || removedAttachments.current.has(attachment.id)) return;
+            waitingMentions.current.push({ id: attachment.id, path });
+            placeWaitingMentions();
+          },
+          (error: unknown) => {
+            if (!mounted.current || removedAttachments.current.has(attachment.id)) return;
+            setAttachments((current) =>
+              current.map((item) => (item.id === attachment.id ? { ...item, state: "error" } : item)),
+            );
+            const failed = error instanceof Error ? error.message : String(error);
+            setNote(attachment.leftOut ? `${failed} ${attachment.leftOut}` : failed);
+          },
+        )
+        .finally(() => {
+          uploadsRunning.current -= 1;
+          pumpUploads();
+        });
+    }
+  }, [onUploadImage, placeWaitingMentions]);
+
   const uploadImages = useCallback(
-    async (incoming: readonly File[]) => {
-      const images = incoming.slice(0, MAX_IMAGES_PER_ACTION);
+    (incoming: readonly File[]) => {
+      const images = incoming.slice(0, settings.attachLimit);
       if (images.length === 0) return;
 
+      // the files left out of this pick: told now, and again beside an upload error of this batch
+      const leftOut = images.length < incoming.length
+        ? t("Only the first {count} of {total} files were taken. Settings → Chat → Files at once sets how many one paste, pick or drop takes.", { count: images.length, total: incoming.length })
+        : null;
       const added = images.map<Attachment>((file) => ({
         id: ++attachmentSequence,
         file,
         previewUrl: (PREVIEW_TYPES as readonly string[]).includes(file.type) ? URL.createObjectURL(file) : "",
         path: null,
         state: "uploading",
+        leftOut,
       }));
       setAttachments((current) => [...current, ...added]);
-      setNote(null);
-
-      for (const attachment of added) {
-        if (!mounted.current) break;
-        try {
-          const path = await onUploadImage(attachment.file);
-          if (!mounted.current) break;
-          if (removedAttachments.current.has(attachment.id)) continue;
-          setAttachments((current) =>
-            current.map((item) => (item.id === attachment.id ? { ...item, path, state: "ready" } : item)),
-          );
-          insertMentionAtCursor(imageMention(path));
-        } catch (error) {
-          if (!mounted.current) break;
-          if (removedAttachments.current.has(attachment.id)) continue;
-          setAttachments((current) =>
-            current.map((item) => (item.id === attachment.id ? { ...item, state: "error" } : item)),
-          );
-          setNote(error instanceof Error ? error.message : String(error));
-        }
-      }
+      setNote(leftOut);
+      uploadQueue.current.push(...added);
+      pumpUploads();
     },
-    [insertMentionAtCursor, onUploadImage],
+    [pumpUploads, settings.attachLimit, t],
   );
 
   const removeAttachment = useCallback((attachment: Attachment) => {
     removedAttachments.current.add(attachment.id);
+    placedMentions.current.delete(attachment.id);
     URL.revokeObjectURL(attachment.previewUrl);
     setAttachments((current) => current.filter((item) => item.id !== attachment.id));
     if (attachment.path) {
@@ -747,7 +830,7 @@ export function Composer({
       textRef.current = rest;
       caretRef.current = rest.length;
       setNote(edited ? t("Sent as it was. Your changes made while it was sending stayed here and were not sent.") : null);
-      for (const attachment of sentAttachments) URL.revokeObjectURL(attachment.previewUrl);
+      for (const attachment of sentAttachments) { URL.revokeObjectURL(attachment.previewUrl); placedMentions.current.delete(attachment.id); }
       setAttachments((current) => current.filter((attachment) => !sentAttachments.includes(attachment)));
     };
     if (!composerDrafts.begin(draftKey, sent)) return;
@@ -1019,7 +1102,12 @@ export function Composer({
         <textarea
           ref={textareaRef}
         onCompositionStart={() => { composingRef.current = true; }}
-        onCompositionEnd={() => { composingRef.current = false; }}
+        onCompositionEnd={() => {
+          composingRef.current = false;
+          // after the input that commits the candidate, which WebKit sends after compositionend, and
+          // in a frame, after the caret of dictation held through the composition has landed
+          setTimeout(() => requestAnimationFrame(() => { if (mounted.current) placeWaitingMentions(); }), 0);
+        }}
           className={`composer-text${manualHeight !== null ? " is-sized" : ""}`}
           rows={1}
           maxLength={MAX_COMPOSER_CHARS}

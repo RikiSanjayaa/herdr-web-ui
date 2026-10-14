@@ -58,11 +58,59 @@ describe("Hermes native informational output", () => {
     expect(labels(prompt)).toEqual(["Previous page", "Close"]);
     expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
   });
+  test("reads a native pager beside a transcript scrollbar and inline footer without accepting new output", () => {
+    const rows = hermesStatusOutput("Model: test-model\nTokens: 0", true).split("\n");
+    rows[0] += " old transcript backdrop    │";
+    rows[rows.length - 1] += "pr910-native-fictional/work";
+    const screen = rows.join("\n");
+    const prompt = parseInteractivePrompt("hermes", screen)!;
+    expect(prompt.body).toBe("Model: test-model\nTokens: 0");
+    expect(labels(prompt)).toEqual(["Previous page", "Close"]);
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
+    expect(parseInteractivePrompt("hermes", screen + "\nNew assistant response")).toBeNull();
+    expect(parseInteractivePrompt("hermes", rows.slice(0, -1).join("\n"))).toBeNull();
+  });
   test("requires a complete active status overlay", () => {
     for (const screen of [hermesStatusOutput().replace("Status", "Logs"), hermesStatusOutput().split("\n").slice(0, -1).join("\n"), hermesStatusOutput() + "\nnew response\nmore output\n❯"]) {
       expect(parseInteractivePrompt("hermes", screen)).toBeNull();
     }
   });
+  test("rejects short stale pager tails, mismatched borders and content after the native hint", () => {
+    const screen = hermesStatusOutput();
+    for (const tail of ["\nDone.", "\nDone.\n❯"]) {
+      expect(parseInteractivePrompt("hermes", screen + tail)).toBeNull();
+    }
+    expect(parseInteractivePrompt("hermes", screen.replace("╚══", "╚═"))).toBeNull();
+    const rows = screen.split("\n");
+    rows.splice(rows.length - 1, 0, "║ Unexpected new output ║");
+    expect(parseInteractivePrompt("hermes", rows.join("\n"))).toBeNull();
+  });
+
+  test("keeps native reload failure separate from successful reload output", () => {
+    for (const body of ["❌ Skills reload failed: unreadable directory", "Skills reload failed: unreadable directory"]) {
+      const prompt = parseInteractivePrompt("hermes", hermesStatusOutput(body, true).replace("Status", "Reload Skills"))!;
+      expect(prompt.title).toBe("Reload Skills failed");
+      expect(prompt.body).toBe(body);
+      expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
+    }
+  });
+
+  test("rejects result chrome followed by a newer response and excludes context pagers", () => {
+    const classic = hermesClassicReadyOutput("⚙️ /profile\nProfile: default\nHome: /tmp/selected-home");
+    const ink = "· /profile\n·\nProfile: default\nHome: /tmp/selected-home\n─ ready │ test model\n❯";
+    for (const screen of [classic, ink]) {
+      expect(parseInteractivePrompt("hermes", screen + "\nNew assistant response", null, true, [], "/profile")).toBeNull();
+    }
+    expect(parseInteractivePrompt("hermes", hermesStatusOutput("Context details", true).replace("Status", "Context"), null, true, [], "/context")).toBeNull();
+  });
+
+  test("does not reinterpret another command's arguments as a help or reload result", () => {
+    const screen = hermesClassicOutput(hermesClassicHelp);
+    for (const sent of ["/status extra", "/reload-skills extra", "/version extra", "/help skills"]) {
+      expect(parseInteractivePrompt("hermes", screen, null, true, [], sent)).toBeNull();
+    }
+  });
+
   test("shows visible help only after an explicit help send with an empty native input", () => {
     expect(parseInteractivePrompt("hermes", hermesHelpOutput)).toBeNull();
     const prompt = parseInteractivePrompt("hermes", hermesHelpOutput, null, true, [], "/help")!;
@@ -71,6 +119,15 @@ describe("Hermes native informational output", () => {
     expect(answerKeys(prompt, { option_index: 0 })).toEqual([]);
     expect(parseInteractivePrompt("hermes", hermesHelpOutput + "typed draft", null, true, [], "/help")).toBeNull();
     expect(parseInteractivePrompt("hermes", hermesHelpOutput, null, true, [], "/help", true)).toBeNull();
+  });
+  test("reads visible Ink help beside the native scrollbar while retaining send and tail guards", () => {
+    const screen = hermesHelpOutput.split("\n").map(line => `${line}    ┃`).join("\n");
+    const prompt = parseInteractivePrompt("hermes", screen, null, true, [], "/help")!;
+    expect(prompt.body).toContain("/logs Show recent gateway log lines");
+    expect(prompt.body).toContain("Tab apply completion");
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([]);
+    expect(parseInteractivePrompt("hermes", screen)).toBeNull();
+    expect(parseInteractivePrompt("hermes", screen + "\nNew assistant response", null, true, [], "/help")).toBeNull();
   });
   test("shows classic status without previous conversation or input chrome", () => {
     const screen = hermesClassicOutput(`Earlier user message\n${hermesClassicStatus}`);
@@ -152,6 +209,21 @@ describe("Hermes native informational output", () => {
     expect(nonemptyPrompt.body).toBe(body);
     expect(labels(nonemptyPrompt)).toEqual(["Dismiss"]);
     expect(answerKeys(nonemptyPrompt, { option_index: 0 })).toEqual([]);
+  });
+  test("reads profile output when buffered command echo follows or splits the result", () => {
+    const body = "Profile: default\nHome: /tmp/selected-home";
+    for (const output of [
+      `${body}\n\n⚙️ /profile`,
+      "Profile: default\n⚙️ /profile\nHome: /tmp/selected-home",
+    ]) {
+      const screen = hermesClassicReadyOutput(`⚙️ /version\nUp to date\n\n${output}`);
+      const prompt = parseInteractivePrompt("hermes", screen, null, true, [], "/profile")!;
+      expect(prompt?.body).toBe(body);
+      expect(answerKeys(prompt, { option_index: 0 })).toEqual([]);
+      expect(parseInteractivePrompt("hermes", screen, null, true, [], "/status")).toBeNull();
+      expect(parseInteractivePrompt("hermes", hermesClassicReadyOutput(`${output}\nNew assistant response`), null, true, [], "/profile")).toBeNull();
+    }
+    expect(parseInteractivePrompt("hermes", hermesClassicReadyOutput(`⚙️ /profile\n${body}\n⚙️ /profile`), null, true, [], "/profile")).toBeNull();
   });
   test("leaves excluded Hermes diff output in Terminal on each native surface", () => {
     const classic = hermesClassicReadyOutput("⚙️ /diff\nNo changes.");
@@ -328,6 +400,28 @@ describe("Hermes native approval prompts", () => {
     const repainted = parseInteractivePrompt("hermes", rawInkScreen.replace("⚠ approval required", "⚠ Mpprdval required"))!;
     expect(repainted.kind).toBe("approval");
     expect(labels(repainted)).toEqual(["Allow once", "Deny"]);
+  });
+
+  test("preserves blank lines inside approved shell commands and their identities", () => {
+    const command = "cat > AGENTS.md <<'EOF'\nfirst\n\nsecond\nEOF";
+    for (const render of [hermesClassicApproval, hermesTuiApproval]) {
+      const prompt = parseInteractivePrompt("hermes", render(0, command))!;
+      expect(prompt.body).toContain(command);
+      const changed = parseInteractivePrompt("hermes", render(0, command.replace("first\n\nsecond", "first\nsecond")))!;
+      expect(changed.id).not.toBe(prompt.id);
+      expect(parseInteractivePrompt("hermes", render().replace(/([╰╚])[─═]/, "$1"))).toBeNull();
+    }
+  });
+
+  test("displays the full native progress target and rejects basename suffix matches", () => {
+    const firstScreen = hermesClassicApproval(0, "<write to AGENTS.md>", undefined, undefined, 240, "⠋", "✍️ /tmp/first/AGENTS.md  (17s · ↓ 24 tok)");
+    const prompt = parseInteractivePrompt("hermes", firstScreen)!;
+    expect(prompt.body).toContain("Target: /tmp/first/AGENTS.md");
+    const other = parseInteractivePrompt("hermes", firstScreen.replace("/tmp/first/AGENTS.md", "/tmp/second/AGENTS.md"))!;
+    expect(other.id).not.toBe(prompt.id);
+    expect(other.body).toContain("Target: /tmp/second/AGENTS.md");
+    const mismatched = hermesClassicApproval(0, "<write to OTHER-AGENTS.md>", "Write to OTHER-AGENTS.md", undefined, 240, "⠋", "✍️ /tmp/AGENTS.md  (17s · ↓ 24 tok)");
+    expect(parseInteractivePrompt("hermes", mismatched)).toBeNull();
   });
 });
 
@@ -3414,6 +3508,71 @@ describe("an answer and the menu it was made for", () => {
       };
       expect((await answer(shown.id, { option_index: 1 })).status).toBe(409);
     });
+  });
+
+  test("leaves malformed native approvals and excluded pagers in Terminal, never generic fallback", async () => {
+    const screens = [
+      hermesClassicApproval(0, "echo safe\n… (command truncated)"),
+      hermesClassicApproval(0, undefined, ""),
+      hermesClassicApproval().replace("╰──", "╰─"),
+      hermesTuiApproval().split("\n").filter(line => !line.startsWith("╚")).join("\n"),
+      hermesStatusOutput().split("\n").slice(0, -1).join("\n"),
+      hermesStatusOutput("No changes.", true).replace("Status", "Diff"),
+      hermesStatusOutput("Context details", true).replace("Status", "Context"),
+    ];
+    for (const screen of screens) {
+      await withPane("hermes", "blocked", screen, async pane => {
+        promptWaitEnded("p_1");
+        expect(await card()).toBeNull();
+        expect(pane.sent).toEqual([]);
+      });
+    }
+  });
+
+  test("does not revive an answered approval through an incomplete redraw", async () => {
+    await withPane("hermes", "blocked", hermesTuiApproval(), async pane => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      expect((await answer(shown.id, { option_index: 0 })).status).toBe(200);
+      expect(pane.sent).toEqual(["enter"]);
+      pane.screen = hermesTuiApproval().replace("╚══", "╚═");
+      expect(await card()).toBeNull();
+      pane.screen = hermesTuiApproval();
+      expect(await card()).toBeNull();
+      expect((await answer(shown.id, { option_index: 0 })).status).toBe(409);
+      expect(pane.sent).toEqual(["enter"]);
+    });
+  });
+
+  test("rechecks Ink approval before every later move and before a direct Enter", async () => {
+    const choices = ["Allow once", "Allow this session", "Always allow", "Deny"];
+    await withPane("hermes", "blocked", hermesTuiApproval(0, undefined, undefined, choices), async pane => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      pane.onSent = key => { if (key === "down") pane.screen = hermesTuiApproval(1, undefined, "changed warning", choices); };
+      expect((await answer(shown.id, { option_index: 3 })).status).toBe(409);
+      expect(pane.sent).toEqual(["down"]);
+    });
+    await withPane("hermes", "blocked", hermesTuiApproval(), async pane => {
+      promptWaitEnded("p_1");
+      const shown = (await card())!;
+      let reads = 0;
+      pane.onRead = () => { if (++reads === 2) pane.screen = hermesTuiApproval(0, "write OTHER.md"); };
+      expect((await answer(shown.id, { option_index: 0 })).status).toBe(409);
+      expect(pane.sent).toEqual([]);
+    });
+  });
+
+  test("preserves generic fallback for unrelated Hermes waits and other agents", async () => {
+    for (const [agent, screen] of [["hermes", "Continue? (y/n)"], ["unknown-agent", "Choose a mode\n1. Safe\n2. Other\nEnter a number"]]) {
+      await withPane(agent!, "blocked", screen!, async pane => {
+        promptWaitEnded("p_1");
+        const shown = (await card())!;
+        expect(shown.fallback).toBe(true);
+        expect(shown.options.length).toBeGreaterThan(1);
+        expect(pane.sent).toEqual([]);
+      });
+    }
   });
 
   const omoRule = "─".repeat(100);

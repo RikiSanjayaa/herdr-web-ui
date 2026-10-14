@@ -26,7 +26,7 @@ import { processStartedAt } from "./process-start.ts";
 
 describe("Hermes skill presentation", () => {
   const header = '[IMPORTANT: The user has invoked the "review" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]';
-  const scaffold = `${header}\n\nPrivate skill instructions\n\n[Skill directory: /skills/review]\nResolve any relative paths in this skill (e.g. scripts/foo.js) against that directory.`;
+  const scaffold = `${header}\n\nPrivate skill instructions\n\n[Skill directory: /skills/review]\nResolve any relative paths in this skill (e.g. \`scripts/foo.js\`, \`templates/config.yaml\`) against that directory, then run them with the terminal tool using the absolute path.`;
   const parse = (content: string) => parseHermesRows([{ id: 1, role: "user", content, tool_call_id: null, tool_calls: null, tool_name: null, reasoning: null, timestamp: 1 }])[0]!.parts;
   it("shows the actual request and skill instead of expanded instructions", () => {
     expect(parse(`${scaffold}\n\nThe user has provided the following instruction alongside the skill invocation: Review changes\nKeep the API stable`)).toEqual([
@@ -41,9 +41,21 @@ describe("Hermes skill presentation", () => {
     expect(parse(`${scaffold}\n\nThe user has provided the following instruction alongside the skill invocation: Review changes\n\n[Runtime note: internal]`)[0]).toEqual({ kind: "text", text: "Review changes" });
   });
   it("preserves quoted, unknown and clipped scaffolds verbatim", () => {
-    for (const content of [`Example: ${scaffold}`, `${header}\npartial`, `${scaffold}\n… trimmed`, '[IMPORTANT: The user has invoked the "review" skill bundle, unknown format]']) {
+    for (const content of [`Example: ${scaffold}`, `${header}\npartial`, `${header}\n\nUnknown body without the native footer`, `${scaffold}\n\nUnexpected suffix`, `${scaffold}\n… trimmed`, '[IMPORTANT: The user has invoked the "review" skill bundle, unknown format]', `${scaffold}\n\nQuoted envelope:\n${scaffold}`]) {
       expect(parse(content)).toEqual([{ kind: "text", text: content }]);
     }
+  });
+  it("preserves instruction markers and incomplete runtime notes inside the user's request", () => {
+    const request = "Review this literal:\n\nThe user has provided the following instruction alongside the skill invocation: nested\n\n[Runtime note: incomplete\nKeep this text";
+    expect(parse(`${scaffold}\n\nThe user has provided the following instruction alongside the skill invocation: ${request}`)[0]).toEqual({ kind: "text", text: request });
+  });
+  it("recognizes native supporting-file scaffolding without discarding the request", () => {
+    const support = '\n\n[This skill has supporting files (paths relative to the skill directory above):]\n- scripts/check.js\n\nLoad any of these with skill_view(name="review", file_path="<path>"), or run scripts directly by absolute path (e.g. `node /skills/review/scripts/foo.js`).';
+    const content = `${scaffold}\n\n[Skill config (from /profile/config.yaml):\n  target = app\n]\n\n[Skill setup note: Setup skipped]${support}\n\nThe user has provided the following instruction alongside the skill invocation: Review changes`;
+    expect(parse(content)).toEqual([
+      { kind: "text", text: "Review changes" },
+      { kind: "skill", skill: { name: "review", path: "/skills/review/SKILL.md", evidence: "instructions", status: "loaded" } },
+    ]);
   });
 });
 
@@ -58,9 +70,18 @@ describe("Hermes Ink session ownership", () => {
       save([entry]);
       expect(hermesRuntimeSession(home, [gateway])).toBe("owned");
       expect(hermesRuntimeSession(home, [])).toBeNull();
+      for (const argv of [["node", "-m", "tui_gateway.entry"], ["python", "-c", "pass", "-m", "tui_gateway.entry"], ["python", "script.py", "-m", "tui_gateway.entry"]]) {
+        expect(hermesRuntimeSession(home, [{ ...gateway, argv }])).toBeNull();
+      }
+      for (const fields of [{ pid: -1 }, { surface: "cli" }, { session_id: "../foreign" }]) {
+        save([{ ...entry, ...fields }]);
+        expect(hermesRuntimeSession(home, [gateway])).toBeNull();
+      }
       save([{ ...entry, process_start_time: entry.process_start_time - 60 }]);
       expect(hermesRuntimeSession(home, [gateway])).toBeNull();
       save([entry, { ...entry, session_id: "other" }]);
+      expect(hermesRuntimeSession(home, [gateway])).toBeNull();
+      writeFileSync(join(home, "runtime", "active_sessions.json"), " ".repeat(1_048_577));
       expect(hermesRuntimeSession(home, [gateway])).toBeNull();
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
@@ -88,7 +109,7 @@ describe("hermes process identification", () => {
 });
 
 describe("a Hermes process's own store", () => {
-  it.skipIf(process.platform !== "linux" && process.platform !== "darwin")("reads HERMES_HOME from the process environment and caches it by process identity", async () => {
+  it.skipIf(process.platform !== "linux" && process.platform !== "darwin")("reads HERMES_HOME only while the cached process identity is alive", async () => {
     const home = mkdtempSync(join(tmpdir(), "hermes-process-home-"));
     const child = Bun.spawn([process.execPath, "-e", "console.log('ready'); for await (const _ of Bun.stdin.stream()) {}"], {
       env: { ...process.env, HERMES_HOME: home },
@@ -101,11 +122,31 @@ describe("a Hermes process's own store", () => {
       expect(await processHermesHome(child.pid, argv)).toBe(home);
       child.kill();
       await child.exited;
-      expect(await processHermesHome(child.pid, argv)).toBe(home);
+      expect(await processHermesHome(child.pid, argv)).toBeNull();
     } finally {
       child.kill();
       await child.exited;
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+  it.skipIf(process.platform !== "linux" && process.platform !== "darwin")("does not pin transient non-existent home directory in cache", async () => {
+    const parentDir = mkdtempSync(join(tmpdir(), "hermes-proc-test-"));
+    const home = join(parentDir, "later-created-home");
+    const child = Bun.spawn([process.execPath, "-e", "console.log('ready'); for await (const _ of Bun.stdin.stream()) {}"], {
+      env: { ...process.env, HERMES_HOME: home },
+      stdin: "pipe",
+      stdout: "pipe",
+    });
+    const argv = ["hermes", "--profile", "custom"];
+    try {
+      await child.stdout.getReader().read();
+      expect(await processHermesHome(child.pid, argv)).toBeNull();
+      mkdirSync(home);
+      expect(await processHermesHome(child.pid, argv)).toBe(home);
+    } finally {
+      child.kill();
+      await child.exited;
+      rmSync(parentDir, { recursive: true, force: true });
     }
   });
 

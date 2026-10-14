@@ -106,6 +106,9 @@ const MAX_INLINE_DEPTH = 16;
  * once, for every opener before it.
  */
 export function* inlineMarks(source: string): Generator<RegExpExecArray> {
+  const opener = /[`[<*_~]|\\\(|file:\/\/\/|https?:\/\/|www\./g;
+  let start = opener.exec(source)?.index;
+  if (start === undefined) return;
   // Underscores inside identifiers are literal: MAC_QA_CHAT_OK must survive
   // rendering exactly as it appears in the terminal and native transcript.
   // a bare or <angle> http(s) URL is a link too; it stops at the first non-ASCII character,
@@ -113,8 +116,6 @@ export function* inlineMarks(source: string): Generator<RegExpExecArray> {
   const marker = /(`[^`\n]+`|\\\(.+?\\\)|\[[^\]\n]+\]\([^\s)]+\)|<https?:\/\/[^\s<>]+>|file:\/\/\/[!#-;=?-_a-~]+|https?:\/\/[!-;=?-~]+|(?<![\w.@/-])www\.[!-;=?-~]+|\*\*[^*\n]+\*\*|(?<![\p{L}\p{N}\p{M}_])__(?=\S)[^\n]*?\S__(?![\p{L}\p{N}\p{M}_])|~~[^~\n]+~~|(?<!\*)\*[^*\n]+\*(?!\*)|(?<![\p{L}\p{N}\p{M}_])_(?=\S)[^\n]*?\S_(?![\p{L}\p{N}\p{M}_]))/yu;
   // its last part alone, for a `__` that nothing closes as bold: one `_` may still close it
   const emphasis = /(?<![\p{L}\p{N}\p{M}_])_(?=\S)[^\n]*?\S_(?![\p{L}\p{N}\p{M}_])/yu;
-  // what any part of `marker` starts with
-  const opener = /[`[<*_~]|\\\(|file:\/\/\/|https?:\/\/|www\./g;
   /** Where `pattern` is next found from `from` on. Asked with a `from` that only rises, so a place found serves every `from` before it. */
   const next = (pattern: RegExp): ((from: number) => number) => {
     let found = -1;
@@ -136,8 +137,10 @@ export function* inlineMarks(source: string): Generator<RegExpExecArray> {
   const strongClose = next(/(?<=\S)__(?![\p{L}\p{N}\p{M}_])/gu);
   let from = 0;
   for (;;) {
-    opener.lastIndex = from;
-    const start = opener.exec(source)?.index;
+    if (from > 0) {
+      opener.lastIndex = from;
+      start = opener.exec(source)?.index;
+    }
     if (start === undefined) return;
     from = start + 1;
     let pattern: RegExp | null = marker;

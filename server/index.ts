@@ -10,7 +10,7 @@ import { alertStatus, paneTitle } from "../shared/notify-policy.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { DEVICE_COOKIE, authClient, handleAuthRequest, isAuthenticated, parseCookies, presentedToken, presentedTokenHeld, recordPresentedTokenFailure, requiresAuth, unauthorizedJson } from "./auth.ts";
 import { cameThroughProxy, decideAccess, isLoopbackAddress, isLoopbackBind, isServeOwnerRequest, lanExposed } from "./access.ts";
-import { DeviceStore, handleDeviceRequest } from "./devices.ts";
+import { DeviceStore, handleDeviceRequest, type DeviceMatch } from "./devices.ts";
 import { handlePreferencesRequest, PreferenceStore } from "./preferences.ts";
 import { remoteAccess, TailnetIdentitySource } from "./tailscale.ts";
 import { paneCommands } from "./commands.ts";
@@ -102,6 +102,7 @@ import { OutputWindow, OUTPUT_HIGH_BYTES, OUTPUT_HARD_BYTES, OUTPUT_STALL_MS, Re
 import { OUTPUT_STALLED_CLOSE_CODE } from "../shared/terminal-flow.ts";
 import { connectUpdater, handleUpdateRequest, type UpdateService } from "./update-api.ts";
 import { handleHerdrUpdateRequest, HerdrUpdater } from "./herdr-update.ts";
+import { handlePortalRequest, PortalService } from "./portal.ts";
 import { handleTelemetryRequest, Telemetry } from "./telemetry.ts";
 import { handleUsageRequest, UsageService } from "./usage.ts";
 import { handleVoiceRequest, VoiceService } from "./voice.ts";
@@ -428,6 +429,8 @@ export function createServer(
     updates?: UpdateService;
     /** updates herdr itself (server/herdr-update.ts); unset, the app offers no herdr update. Tests pass one that runs a stand-in herdr. */
     herdrUpdate?: HerdrUpdater;
+    /** a public address through Portal (server/portal.ts); unset, the app offers none. Tests pass one that runs a stand-in portal. */
+    portal?: PortalService;
     /** anonymous install and update counts (server/telemetry.ts); unset, the server sends none and answers 404. Only the real entrypoint passes one. */
     telemetry?: Telemetry;
     /** plan limits of the AI subscriptions signed in here; tests pass one without real sign-ins */
@@ -573,11 +576,13 @@ export function createServer(
    * the input box (Claude Code 2.1.295, #404). A space after the mention closes them first; a
    * payload already in bracketed-paste markers gets it inside them.
    */
-  const closeMention = (text: string): string => {
+  const closeMention = (text: string, hermes = false): string => {
     const open = text.startsWith("\u001b[200~") ? "\u001b[200~" : "";
     const close = open && text.endsWith("\u001b[201~") ? "\u001b[201~" : "";
     const body = text.slice(open.length, text.length - close.length);
-    return /(?:^|\s)@\S+$/.test(body) ? `${open}${body} ${close}` : text;
+    // A bare Hermes command otherwise leaves its completion open for the committing Enter.
+    const command = hermes && /^\/(?:help|status|reload[-_]skills|version|v|profile)\s*$/.test(body);
+    return command || /(?:^|\s)@\S+$/.test(body) ? `${open}${body.trimEnd()} ${close}` : text;
   };
 
   /**
@@ -588,6 +593,7 @@ export function createServer(
   async function submitText(paneId: string, text: string, payload: string, arrivedAt: number, fromTerminal = false, authorize: () => void = () => {},
     clearDraft?: string, confirmation?: { draft: string; identity: PendingIdentity }): Promise<void> {
     let clearedDraft = false;
+    let hermes = false;
     const inTime = (reserve = 0): void => {
       authorize();
       if (Date.now() - arrivedAt > (options.submitDeadlineMs ?? SUBMIT_DEADLINE_MS) - reserve) {
@@ -606,6 +612,7 @@ export function createServer(
           if (error instanceof HerdrError && error.code === "pane_not_found") return undefined;
           throw error;
         });
+        hermes = pane?.agent === "hermes";
         inTime();
         const identity = pane ? pendingIdentity(pane) : null;
         const sameClaude = (current: PendingIdentity | null): boolean => current?.agent === "claude"
@@ -679,9 +686,7 @@ export function createServer(
           if (clearDraft !== undefined && !claudeInputEmpty(...reads)) throw new InputDraftError(null);
         }
         try {
-          // Close informational command completion before the committing Enter.
-          const submitted = pane?.agent === "hermes" && /^\/(?:help|status|reload[-_]skills|version|v|profile)\s*$/.test(text) ? `${text.trim()} ` : closeMention(text);
-          await agentPrompt(paneId, submitted);
+          await agentPrompt(paneId, closeMention(text, hermes));
           noteSubmitted(paneId, text);
           return;
         } catch (error) {
@@ -695,7 +700,7 @@ export function createServer(
       // a mirrored pane's browser never learned the program's paste mode, so `payload` came as bare
       // lines: several of them are shaped here as the same block typed into the mirror is. herdr is
       // asked only for such a block, so a one-line message never waits on it.
-      const shaped = await mirrorInput(closeMention(payload), async () => await terminalAttach() ? null : (await paneContext(paneId)).agent);
+      const shaped = await mirrorInput(closeMention(payload, !fromTerminal && hermes), async () => await terminalAttach() ? null : (await paneContext(paneId)).agent);
       inTime();
       await paneSendText(paneId, shaped);
       await Bun.sleep(options.submitDelayMs ?? SUBMIT_DELAY_MS);
@@ -1273,8 +1278,8 @@ export function createServer(
         clearTimeout(tailTimer);
         const visible = outputTail.push(data);
         if (visible) forward(visible);
-        // A pane may print the same bytes without exiting: never keep its text indefinitely.
-        if (outputTail.pending) tailTimer = setTimeout(flushTail, holdFor);
+        // A complete refusal gets the exit budget; partial matches must not delay ordinary pane text.
+        if (outputTail.pending) tailTimer = setTimeout(flushTail, isTakeoverExit(output) ? ATTACH_REFUSAL_EXIT_MS : holdFor);
       };
       /** ended before its exit came: what it still prints is no attach's */
       let retired = false;
@@ -1632,12 +1637,25 @@ export function createServer(
   waitTimer.unref?.();
   plans.start();
 
+  type PortalStartup = { ok: true } | { ok: false; error: unknown };
+  let settlePortalStartup!: (result: PortalStartup) => void;
+  let portalStartupResult: PortalStartup | undefined;
+  const portalStartup = new Promise<PortalStartup>((resolve) => {
+    settlePortalStartup = (result) => {
+      if (portalStartupResult !== undefined) return;
+      portalStartupResult = result;
+      resolve(result);
+    };
+  });
+
   const envPort = process.env["PORT"];
   const server = Bun.serve<SocketData>({
     port: options.port ?? (envPort ? Number(envPort) : DEFAULT_PORT),
     hostname,
 
     async fetch(request, bunServer) {
+      const startup = portalStartupResult ?? await portalStartup;
+      if (!startup.ok) return compressResponse(request, errorResponse(startup.error));
       // the route's answer, gzipped for a browser that takes it (server/compress.ts)
       return compressResponse(request, await (async (): Promise<Response | undefined> => {
       const url = new URL(request.url);
@@ -1658,7 +1676,13 @@ export function createServer(
       // the connection server's own bridge token does not
       if (presented === "wrong" && !bridgeAuthorized) recordPresentedTokenFailure(client);
       const tokenMatched = presented === "match";
-      const pairedDevice = devices.match(parseCookies(request.headers.get("cookie")).get(DEVICE_COOKIE));
+      let pairedDevice: DeviceMatch | null;
+      try {
+        pairedDevice = devices.match(parseCookies(request.headers.get("cookie")).get(DEVICE_COOKIE));
+      } catch (error) {
+        // First-cookie confirmation is an authorization write, not best-effort telemetry.
+        return errorResponse(error);
+      }
       const requestShape = { loopback, forwarded, funnel, tailscaleLogin, serveOnly };
       const identity = await identityOf(token === "" && pairedDevice === null && isServeOwnerRequest(requestShape) && (pathname === "/ws" || pathname.startsWith("/api/")), requestHost);
       const access = decideAccess({
@@ -1761,6 +1785,9 @@ export function createServer(
         return handleUpdateRequest(request, pathname, options.updates);
       }
       if (pathname === "/api/herdr/update") return handleHerdrUpdateRequest(request, options.herdrUpdate);
+      if (pathname === "/api/portal" || pathname.startsWith("/api/portal/")) {
+        return handlePortalRequest(request, pathname, options.portal, { port: bunServer.port ?? DEFAULT_PORT, tokenSet: token !== "", serveOnly });
+      }
       if (pathname === "/api/telemetry") return handleTelemetryRequest(request, options.telemetry);
       // what every browser of this server shares; a watching device reads it and cannot change it (above)
       if (pathname === "/api/preferences") return handlePreferencesRequest(request, preferences);
@@ -3231,6 +3258,21 @@ export function createServer(
     },
   });
 
+  if (options.portal) {
+    let resume: Promise<void>;
+    try {
+      resume = options.portal.resume({ port: server.port ?? DEFAULT_PORT, tokenSet: token !== "", serveOnly });
+    } catch (error) {
+      resume = Promise.reject(error);
+    }
+    void resume.then(
+      () => settlePortalStartup({ ok: true }),
+      (error: unknown) => settlePortalStartup({ ok: false, error }),
+    );
+  } else {
+    settlePortalStartup({ ok: true });
+  }
+
   const registration = options.registerBridge ? registerBridge(server.port ?? 0, bridgeToken) : null;
 
   // ACKs can stop arriving entirely (a suspended tab). Bound the pause even then.
@@ -3247,6 +3289,7 @@ export function createServer(
     alertsSettled: () => push.settled(),
     stop: () => {
       stopped = true;
+      settlePortalStartup({ ok: false, error: new Error("Server stopped before Portal startup cleanup completed") });
       conversations.stop();
       clearInterval(outputTimer);
       collector.stop();
@@ -3255,6 +3298,7 @@ export function createServer(
       clearInterval(waitTimer);
       plans.stop();
       machines?.stop();
+      void options.portal?.shutdown();
       registration?.close();
       for (const client of clients) killWatches(client);
       for (const paneId of [...attachments.keys()]) closeAttachment(paneId);
@@ -3267,7 +3311,8 @@ if (import.meta.main) {
   const updates = connectUpdater();
   const version = (JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8")) as { version: string }).version;
   const telemetry = new Telemetry({ stateDir: defaultStateDir(), version, env: process.env, fetch, previousVersion: () => updates.installed().previous_version });
-  const instance = createServer({ updates, herdrUpdate: new HerdrUpdater(), telemetry, registerBridge: true, herdrProfiles: readHerdrProfiles });
+  const portal = new PortalService({ stateDir: defaultStateDir() });
+  const instance = createServer({ updates, herdrUpdate: new HerdrUpdater(), portal, telemetry, registerBridge: true, herdrProfiles: readHerdrProfiles });
   telemetry.start();
   let stopping = false;
   const shutdown = () => {
@@ -3275,8 +3320,9 @@ if (import.meta.main) {
     stopping = true;
     telemetry.stop();
     instance.stop();
-    // Attach sidecars need ~1.2s to release herdr's exclusive client slot.
-    setTimeout(() => process.exit(0), 2000);
+    // Attach sidecars need ~1.2s to release herdr's exclusive client slot; Portal unregisters from
+    // its relay, and the pipes it logs to must outlive it
+    void Promise.all([Bun.sleep(2000), portal.shutdown()]).then(() => process.exit(0));
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
