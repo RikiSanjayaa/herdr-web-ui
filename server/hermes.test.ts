@@ -17,6 +17,7 @@ import {
   isHermesProcess,
   parseHermesRows,
   processHermesHome,
+  paneHermesCommandContext,
   type HermesMessageRow,
 } from "./hermes.ts";
 import { ConversationNotStarted, ConversationUnavailable, HistoryChanged, TRANSCRIPT_WINDOW_BYTES, type RecognizedConversation } from "./conversation.ts";
@@ -27,6 +28,7 @@ import { processStartedAt } from "./process-start.ts";
 describe("Hermes skill presentation", () => {
   const header = '[IMPORTANT: The user has invoked the "review" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]';
   const scaffold = `${header}\n\nPrivate skill instructions\n\n[Skill directory: /skills/review]\nResolve any relative paths in this skill (e.g. \`scripts/foo.js\`, \`templates/config.yaml\`) against that directory, then run them with the terminal tool using the absolute path.`;
+  /** Parse a single native user row through the production skill-envelope recognition path. */
   const parse = (content: string) => parseHermesRows([{ id: 1, role: "user", content, tool_call_id: null, tool_calls: null, tool_name: null, reasoning: null, timestamp: 1 }])[0]!.parts;
   it("shows the actual request and skill instead of expanded instructions", () => {
     expect(parse(`${scaffold}\n\nThe user has provided the following instruction alongside the skill invocation: Review changes\nKeep the API stable`)).toEqual([
@@ -66,6 +68,7 @@ describe("Hermes Ink session ownership", () => {
       mkdirSync(join(home, "runtime"));
       const gateway = { pid: process.pid, argv: ["python", "-m", "tui_gateway.entry"] };
       const entry = { pid: process.pid, surface: "tui", process_start_time: processStartedAt(process.pid)! / 1000, session_id: "owned" };
+      /** Replace this fixture's registry with the ownership evidence for the current assertion. */
       const save = (entries: unknown[]) => writeFileSync(join(home, "runtime", "active_sessions.json"), JSON.stringify({ entries }));
       save([entry]);
       expect(hermesRuntimeSession(home, [gateway])).toBe("owned");
@@ -84,6 +87,120 @@ describe("Hermes Ink session ownership", () => {
       writeFileSync(join(home, "runtime", "active_sessions.json"), " ".repeat(1_048_577));
       expect(hermesRuntimeSession(home, [gateway])).toBeNull();
     } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+});
+
+describe.skipIf(process.platform !== "linux" && process.platform !== "darwin")("Hermes profile registry ownership", () => {
+  let root: string;
+  let source: string;
+  let child: Bun.Subprocess<"pipe", "pipe", "inherit">;
+  let listener: Bun.SocketListener<{ buffer: string }>;
+  let socketBefore: string | undefined;
+
+  /** Write native fixture files without using the user's Hermes installation. */
+  function put(path: string, content: string): void {
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, content);
+  }
+
+  /** Save the real registry shape consumed by both profile and transcript lookup. */
+  function registry(home: string, entries: unknown[]): void {
+    put(join(home, "runtime", "active_sessions.json"), JSON.stringify({ entries }));
+  }
+
+  /** Bind fixture evidence to the owned child's measured start, never a guessed session. */
+  function ownedEntry(session = "owned") {
+    const startedAt = processStartedAt(child.pid);
+    expect(startedAt).not.toBeNull();
+    return { pid: child.pid, surface: "tui", process_start_time: startedAt! / 1000, session_id: session };
+  }
+
+  beforeEach(async () => {
+    root = mkdtempSync(join(tmpdir(), "hermes-profile-registry-"));
+    source = join(root, "source");
+    put(join(source, "agent", "skill_commands.py"), "for entry in _skill_catalog():\n    pass\n");
+    put(join(source, "tools", "skills_guard.py"), 'SCANNER_VERSION = "fixture-scanner"\n');
+    put(join(source, "hermes_cli", "commands.py"), 'COMMAND_REGISTRY = [CommandDef("status", "Status", "Session")]\n');
+    put(join(root, "active_profile"), "not-session-evidence");
+    child = Bun.spawn([process.execPath, "-e", "console.log('ready'); for await (const _ of Bun.stdin.stream()) {}"], {
+      env: { ...process.env, HOME: root, HERMES_HOME: root, PYTHONPATH: source },
+      stdin: "pipe", stdout: "pipe",
+    });
+    const reader = child.stdout.getReader();
+    const ready = await reader.read();
+    reader.releaseLock();
+    expect(new TextDecoder().decode(ready.value)).toBe("ready\n");
+    socketBefore = process.env["HERDR_SOCKET"];
+    const socket = join(root, "herdr.sock");
+    process.env["HERDR_SOCKET"] = socket;
+    listener = Bun.listen<{ buffer: string }>({
+      unix: socket,
+      socket: {
+        /** Accumulate the real RPC client's newline-delimited request. */
+        open(socket) { socket.data = { buffer: "" }; },
+        /** Return only synthetic pane metadata; process lifetimes remain real. */
+        data(socket, chunk) {
+          socket.data.buffer += chunk.toString();
+          if (!socket.data.buffer.includes("\n")) return;
+          const request = JSON.parse(socket.data.buffer) as { id: string; method: string; params: { pane_id: string } };
+          socket.end(`${JSON.stringify({ id: request.id, result: { process_info: { foreground_processes: [
+            { pid: process.pid, argv: ["hermes", "--profile", "not-session-evidence"], cwd: root },
+            { pid: child.pid, argv: ["python", "-m", "tui_gateway.entry"], cwd: root },
+          ] } } })}\n`);
+        },
+      },
+    });
+  });
+
+  afterEach(async () => {
+    child.kill();
+    await child.exited;
+    listener.stop(true);
+    if (socketBefore === undefined) delete process.env["HERDR_SOCKET"];
+    else process.env["HERDR_SOCKET"] = socketBefore;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("selects the lifetime-bound registry among all 64 named profiles", async () => {
+    const entry = ownedEntry();
+    for (let i = 0; i < 64; i++) {
+      registry(join(root, "profiles", `profile-${i}`), [{ ...entry, process_start_time: entry.process_start_time - 60 }]);
+    }
+    const selected = join(root, "profiles", "profile-63");
+    registry(selected, [entry, entry]);
+    expect(await paneHermesCommandContext("fixture-pane")).toMatchObject({ home: selected, scannerVersion: "fixture-scanner" });
+    expect(hermesRuntimeSession(selected, [{ pid: child.pid, argv: ["python", "-m", "tui_gateway.entry"] }])).toBe("owned");
+  });
+
+  it("does not select a profile for a foreign PID or a reused PID's old start", async () => {
+    const entry = ownedEntry();
+    registry(join(root, "profiles", "foreign"), [{ ...entry, pid: process.pid }]);
+    registry(join(root, "profiles", "reused"), [{ ...entry, process_start_time: entry.process_start_time - 60 }]);
+    expect(await paneHermesCommandContext("fixture-pane")).toBeNull();
+    const gateway = { pid: child.pid, argv: ["python", "-m", "tui_gateway.entry"] };
+    expect(hermesRuntimeSession(join(root, "profiles", "foreign"), [gateway])).toBeNull();
+    expect(hermesRuntimeSession(join(root, "profiles", "reused"), [gateway])).toBeNull();
+  });
+
+  it("rejects ambiguous registry sessions and multiple matching profiles", async () => {
+    const entry = ownedEntry();
+    const first = join(root, "profiles", "first"), second = join(root, "profiles", "second");
+    registry(first, [entry, { ...entry, session_id: "another" }]);
+    expect(await paneHermesCommandContext("fixture-pane")).toBeNull();
+    expect(hermesRuntimeSession(first, [{ pid: child.pid, argv: ["python", "-m", "tui_gateway.entry"] }])).toBeNull();
+    registry(first, [entry]);
+    registry(second, [entry]);
+    expect(await paneHermesCommandContext("fixture-pane")).toBeNull();
+  });
+
+  it("standalone transcript lookup rejects a registry after its gateway exits", async () => {
+    registry(root, [ownedEntry()]);
+    const gateway = { pid: child.pid, argv: ["python", "-m", "tui_gateway.entry"] };
+    expect(hermesRuntimeSession(root, [gateway])).toBe("owned");
+    child.kill();
+    await child.exited;
+    expect(hermesRuntimeSession(root, [gateway])).toBeNull();
+    expect(await paneHermesCommandContext("fixture-pane")).toBeNull();
   });
 });
 

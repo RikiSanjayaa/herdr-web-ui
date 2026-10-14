@@ -2,7 +2,9 @@ import { expect, test } from "bun:test";
 import type { SlashCommand } from "../../shared/protocol.ts";
 import { cachedPaneCommands, cancelPaneCommandRequests, invalidatePaneCommands, paneCommandRevision, subscribePaneCommands } from "./paneCommandCache.ts";
 
+/** Build a one-skill inventory whose name distinguishes fresh results from stale reads. */
 const commands = (name: string): SlashCommand[] => [{ name, description: "Fictional skill", source: "skill" }];
+/** Fail any fetch attempted when the test expects the current inventory to come from cache. */
 const unexpectedRead = async (): Promise<SlashCommand[]> => { throw new Error("the current inventory should be cached"); };
 
 test("a late pre-reload read cannot replace the shared refreshed inventory", async () => {

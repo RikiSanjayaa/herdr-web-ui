@@ -7,10 +7,12 @@ const requests = new Map<string, object>();
 const revisions = new Map<string, number>();
 const listeners = new Map<string, Set<() => void>>();
 
+/** Read the PC-scoped pane's invalidation counter; a pane never invalidated starts at zero. */
 export function paneCommandRevision(paneId: string, machineId: string): number {
   return revisions.get(paneStorageId(machineId, paneId)) ?? 0;
 }
 
+/** Listen for synchronous inventory invalidations on one PC/pane pair; return a subscription cleanup. */
 export function subscribePaneCommands(paneId: string, machineId: string, listener: () => void): () => void {
   const key = paneStorageId(machineId, paneId);
   let subscribers = listeners.get(key);

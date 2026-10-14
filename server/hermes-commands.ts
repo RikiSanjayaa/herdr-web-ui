@@ -29,6 +29,7 @@ const SUPPORT: Record<string, true> = { references: true, templates: true, asset
 const PYTHON_PLATFORM: Record<string, string> = { macos: "darwin", windows: "win32" };
 type Mapping = Record<string, unknown>;
 
+/** Treat non-object YAML or JSON values as empty metadata, excluding arrays. */
 function mapping(value: unknown): Mapping {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Mapping : {};
 }
@@ -57,6 +58,7 @@ export function readHermesFile(path: string, limit = MAX_FILE_BYTES): Buffer {
 
 interface ScanBudget { entries: number; bytes: number }
 
+/** Charge stable file reads to the shared budget; size or mutation errors invalidate the whole scan. */
 function readBytes(path: string, limit = MAX_FILE_BYTES, budget?: ScanBudget): Buffer {
   if (budget && budget.bytes > MAX_SCAN_BYTES) throw new Error("Hermes discovery exceeds its byte bound");
   let bytes: Buffer;
@@ -70,6 +72,7 @@ function readBytes(path: string, limit = MAX_FILE_BYTES, budget?: ScanBudget): B
   return bytes;
 }
 
+/** Collect directory entries within the shared scan cap and close the directory even on failure. */
 function entries(path: string, budget: ScanBudget): Dirent[] {
   const directory = opendirSync(path);
   try {
@@ -82,10 +85,12 @@ function entries(path: string, budget: ScanBudget): Dirent[] {
   } finally { directory.closeSync(); }
 }
 
+/** Parse a bounded UTF-8 YAML file, tolerating a BOM and treating non-mapping roots as empty. */
 function yaml(path: string, budget?: ScanBudget): Mapping {
   return mapping(Bun.YAML.parse(readBytes(path, MAX_FILE_BYTES, budget).toString("utf8").replace(/^\uFEFF/, "")));
 }
 
+/** Normalize disable-list values, including YAML array strings, to trimmed nonempty strings. */
 function strings(value: unknown): string[] {
   if (typeof value === "string" && value.trimStart().startsWith("[")) {
     try { value = Bun.YAML.parse(value); } catch { return []; }
@@ -112,12 +117,14 @@ function compare(a: string, b: string): number {
   return (a.length - i) - (b.length - j);
 }
 
+/** Match native command-name normalization, retaining Unicode letters and numbers only in modern Hermes. */
 function slug(name: string, legacy: boolean): string {
   const value = name.toLowerCase().replace(/[ _]/g, "-");
   return (legacy ? value.replace(/[^a-z0-9-]/g, "") : value.replace(/[^\p{L}\p{N}_-]/gu, ""))
     .replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
 }
 
+/** Resolve configured paths using the selected process's environment and home; reject unresolved home or base identity. */
 function expand(path: string, context: HermesCommandContext, base: string | null = context.home): string {
   let value = path.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
     (original, braced: string, plain: string) => context.env[braced || plain] ?? original);
@@ -148,6 +155,7 @@ export function hermesNativeFeatures(source: string): Pick<HermesCommandContext,
   } catch { return null; }
 }
 
+/** Find the nearest canonical Git root within 64 ancestors, excluding the user's home itself. */
 function projectRoot(cwd: string, userHome: string): string | null {
   const canonicalHome = realpathSync(userHome);
   let dir = realpathSync(cwd);
@@ -177,6 +185,7 @@ function projectApproved(dir: string, context: HermesCommandContext, budget: Sca
   if (!context.scannerVersion) return false;
   try {
     const files: { path: string; name: string }[] = [];
+    /** Inventory regular files for bundle hashing without following directory symlinks, with a 64-level depth cap. */
     const visit = (path: string, depth: number): void => {
       if (depth > 64) throw new Error("Hermes skill scan exceeds its depth bound");
       for (const entry of entries(path, budget)) {
@@ -203,6 +212,7 @@ function projectApproved(dir: string, context: HermesCommandContext, budget: Sca
   } catch { return false; }
 }
 
+/** Apply platform and selected-environment gates; modern app requirements remain hidden without plugin-state proof. */
 function visible(metadata: Mapping, context: HermesCommandContext, config: Mapping): boolean {
   const platforms = (Array.isArray(metadata.platforms) ? metadata.platforms : metadata.platforms ? [metadata.platforms] : []).map(value => String(value).trim());
   if (platforms.length && !platforms.some(p => process.platform.startsWith(PYTHON_PLATFORM[p.toLowerCase()] ?? p.toLowerCase()))) return false;
@@ -230,6 +240,7 @@ function skillFiles(root: string, legacy: boolean, budget: ScanBudget): string[]
   if (legacy) {
     try { activeOrg = readBytes(join(root, "_org", ".active_org"), 4096, budget).toString("utf8").trim() || null; } catch { /* no active org */ }
   }
+  /** Follow native skill roots with ancestor-only cycle detection, pruning support folders and inactive legacy orgs. */
   const visit = (dir: string, ancestors: Set<string>, depth: number): void => {
     if (depth > 64) throw new Error("Hermes traversal exceeds its depth bound");
     const real = realpathSync(dir);
@@ -253,6 +264,7 @@ function skillFiles(root: string, legacy: boolean, budget: ScanBudget): string[]
   return matches.sort(compare);
 }
 
+/** Choose a name's highest-priority alias owner; identical copies in one root need a uniquely shallowest path. */
 function uniqueCandidate(index: number, candidates: Candidate[]): boolean {
   const candidate = candidates[index]!;
   const owners = candidates.map((entry, i) => ({ entry, i })).filter(({ entry }) => entry.aliases.includes(candidate.name));
@@ -261,6 +273,7 @@ function uniqueCandidate(index: number, candidates: Candidate[]): boolean {
   if (contenders.length === 1) return contenders[0]!.i === index;
   if (!contenders.every(({ entry }) => entry.root.path === contenders[0]!.entry.root.path && entry.bytes.equals(contenders[0]!.entry.bytes))) return false;
   const ranked = contenders.sort((a, b) => relative(a.entry.root.path, a.entry.path).split(/[\\/]/).length - relative(b.entry.root.path, b.entry.path).split(/[\\/]/).length);
+  /** Count root-relative path components to reject equal-depth copies rather than picking an arbitrary winner. */
   const depth = ({ entry }: typeof ranked[number]) => relative(entry.root.path, entry.path).split(/[\\/]/).length;
   return depth(ranked[0]!) !== depth(ranked[1]!) && ranked[0]!.i === index;
 }
@@ -298,6 +311,7 @@ export function discoverHermesSkills(cwd: string | null | undefined, context: He
     let localSkills = join(context.home, "skills");
     try { localSkills = realpathSync(localSkills); } catch { /* Missing optional local root. */ }
     const roots: Root[] = [];
+    /** Register canonical directory roots once, excluding native ignored paths and project aliases of profile skills. */
     const add = (path: string, tier: number) => {
       try {
         const canonical = realpathSync(path);

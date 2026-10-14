@@ -1879,6 +1879,7 @@ function withoutClaudeTasks(shown: string[], hintEnds: (lines: string[], end: nu
   return end < shown.length && hintEnds(shown, end) ? shown.slice(0, end) : shown;
 }
 
+/** Confirm each responder's native hint still owns the screen tail, ignoring only known chrome. */
 function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   const cleanLines = screen.replace(ANSI_RE, "").split(/\r?\n/).map(cleanLine);
   const visible = cleanLines.filter((line) => line && !isDivider(line));
@@ -2273,6 +2274,7 @@ function parseHermesPager(screen: string): ParsedPrompt | null {
     optionSteps: (end ? ["pageup", KEY.escape] : ["pageup", "pagedown", KEY.escape]).map(key => keySteps([key])) });
 }
 
+/** Build a read-only command-result card whose dismissal never sends a native terminal key. */
 function hermesOutputPrompt(title: string, body: string): ParsedPrompt {
   return finishPrompt("hermes", {
     kind: "menu", title, question: "Visible terminal output; use Terminal to scroll the full output.",
@@ -2432,16 +2434,38 @@ const HERMES_TUI_APPROVAL_HINT = /^↑\/↓ select · Enter confirm · 1-(\d) qu
 const HERMES_TRUNCATED_RE = /…|\(command truncated|\(description truncated|\(detail truncated/;
 const HERMES_TOOL_PROGRESS_RE = /^(?:✍️?|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|[\u2800-\u28ff]|⚡|⚙️)\s+(\S.*?)(?:\s+\(?\s*(?:\d+m\s*)?\d+(?:\.\d+)?s(?:\s*·\s*↓\s*\d+\s*tok)?\))?$/;
 
-/** An unreadable native approval or pager must not regain Enter through generic fallback. */
+/** Withhold fallback only when native approval or pager chrome still owns the screen tail.
+ * Borders and contents may be unreadable, but unrelated output below them ends ownership. */
 function hermesNeedsTerminal(screen: string): boolean {
-  const plain = screen.replace(ANSI_RE, "");
-  return /Dangerous Command|⚠️?[^\n]* required ·|↑\/↓ to select, Enter to confirm|↑\/↓ select · Enter confirm · 1-/.test(plain)
-    || /^\s*║\s*(?:Status|Reload Skills|Version|Profile|Review|Diff|Context)\s*║/m.test(plain)
-    || /Esc\/q\s+close\s*\(/.test(plain);
+  const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    const classicHint = /↑\/↓ to select, Enter to confirm/.test(line);
+    const classic = /Dangerous Command/.test(line) || classicHint;
+    const native = classic || /⚠️?[^\n]* required ·|↑\/↓ select · Enter confirm · 1-|Esc\/q\s+close\s*\(/.test(line)
+      || /^\s*║\s*(?:Status|Reload Skills|Version|Profile|Review|Diff|Context)\s*║/.test(line);
+    if (!native) continue;
+    // Classic's hint is outside its panel; check its composer rather than treating it as a row.
+    if (classicHint && hermesTail(lines, index - 1, true, true)) return true;
+    // A complete boundary still identifies the native tail when an interior row is damaged.
+    const bottom = lines.findIndex((following, next) => next > index && /^\s*[╰╚]/.test(following));
+    let end = bottom >= 0 ? bottom : index;
+    if (bottom < 0) {
+      // Without a bottom border, require the remaining panel rows to reach native chrome.
+      for (let next = index + 1; next < lines.length; next += 1) {
+        const following = lines[next]!;
+        if (following.trim() && !/^\s*[│║]/.test(following)) break;
+        end = next;
+      }
+    }
+    if (hermesTail(lines, end, classic, true) || hermesTail(lines, end, false)) return true;
+  }
+  return false;
 }
 
-/** Only native chrome may follow the panel. */
-function hermesTail(lines: string[], end: number, classic: boolean): boolean {
+/** Only native chrome may follow a panel. Suppression may accept a damaged classic hint,
+ * but actionable approval parsing always requires its complete countdown footer. */
+function hermesTail(lines: string[], end: number, classic: boolean, unreadable = false): boolean {
   const tail = lines.slice(end + 1).map((line) => line.replace(ANSI_RE, "").trim().replace(/^[│║]\s?/, "").replace(/\s?[│║]$/, "").trim()).filter(Boolean);
   if (!classic) return tail.length <= 2 && tail.every((line) => /^─(?:\s|─)/.test(line));
   const hint = HERMES_CLASSIC_APPROVAL_HINT;
@@ -2452,6 +2476,17 @@ function hermesTail(lines: string[], end: number, classic: boolean): boolean {
   if (hintEnd < 0 && tail.length > 0 && HERMES_TOOL_PROGRESS_RE.test(tail[0]!)) {
     for (let span = 1; span <= Math.min(4, tail.length - 1); span += 1) {
       if (hint.test(tail.slice(1, 1 + span).join(" "))) { hintEnd = 1 + span; break; }
+    }
+  }
+  if (hintEnd < 0 && unreadable) {
+    const start = HERMES_TOOL_PROGRESS_RE.test(tail[0] ?? "") ? 1 : 0;
+    for (let span = 1; span <= Math.min(4, tail.length - start); span += 1) {
+      const candidate = tail.slice(start, start + span).join(" ");
+      if (/^↑\/↓ to select, Enter to confirm\b/.test(candidate)
+        && tail.slice(start + span).every(line => /^─+$|^[⚕☤]\s|^⚠\s*[❯›>]/.test(line))) {
+        hintEnd = start + span;
+        break;
+      }
     }
   }
   if (hintEnd < 0) return false;
@@ -2568,6 +2603,7 @@ function hermesPrompt(
   }, target ? { call: target } : {});
 }
 
+/** Parse the native clarify question and choices only when its input footer owns the screen tail. */
 function parseHermesClarify(screen: string): ParsedPrompt | null {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map((line) => line.trimEnd());
   const hintIndex = findLastIndex(lines, (line) => HERMES_HINT_RE.test(line.trim()));
@@ -2642,6 +2678,7 @@ function parseHermesClarify(screen: string): ParsedPrompt | null {
   });
 }
 
+/** Try the agent's native readers and admit only prompts whose terminal tail remains active. */
 function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null, omoTrusted = true, omoOpen: OmoAsk[] = [], sent: string | null = null, working = false): ParsedPrompt | null {
   const omo = () => {
     const forms = (ask: OmoAsk | null, trusted: boolean) => [parseOmoQuestion(screen, ask, trusted), parseOmoTyping(screen, ask, trusted), parseOmoReview(screen, ask, trusted)];
@@ -3392,6 +3429,7 @@ export async function claudeHeldIsGrey(paneId: string, prompt: InteractivePrompt
     .then((read) => same(claudeGreyInput(read.text)), () => false);
 }
 
+/** Read a fresh pane snapshot and prompt asking, withholding fallback for unsafe native screens. */
 async function readPrompt(paneId: string, codexHome?: string): Promise<{ agent: string; status: string; prompt: InteractivePrompt | null; pane: HerdrPane; panes: HerdrPane[] }> {
   const { panes } = await sessionSnapshot();
   // a closed pane's wait has ended too
@@ -3455,6 +3493,7 @@ async function omoAsksFor(paneId: string, cwd: string, panes: HerdrPane[]): Prom
   catch { return []; }
 }
 
+/** Resolve supported native prompts and withhold answered or unreadable Hermes panels from fallback. */
 async function readKnownPrompt(
   paneId: string,
   pane: { cwd?: string | null; agent_status?: string },
@@ -3607,6 +3646,7 @@ export interface PromptRequestOptions {
   codexHome?: string;
 }
 
+/** Serve prompt reads and serialized answers, rechecking the asking and native cursor before commit. */
 export async function handlePromptRequest(request: Request, url: URL, options: PromptRequestOptions = {}): Promise<Response | null> {
   if (url.pathname !== "/api/pane/prompt" && url.pathname !== "/api/pane/prompt/answer") return null;
   // the answer being handled, once its body was read: what the log line says even when the handling throws

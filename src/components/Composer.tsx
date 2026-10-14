@@ -297,12 +297,13 @@ export function Composer({
   /** the restored text the box was filled with: only that fill is ever cleared, never the user's own typing */
   const filledFrom = useRef<string | null>(null);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
-  // Dismissing a completion must not cancel its inventory read or start another one.
-  const [commandReload, setCommandReload] = useState(() => ({ paneId, machineId, agent, cwd, id: skillsReloaded }));
+  // Each new completion refreshes, even with identical text. Dismissal leaves its read alive.
+  const [commandReload, setCommandReload] = useState(() => ({ paneId, machineId, agent, cwd, id: skillsReloaded, shown: skillsReloaded, sequence: 0 }));
   if (commandReload.paneId !== paneId || commandReload.machineId !== machineId || commandReload.agent !== agent || commandReload.cwd !== cwd) {
-    setCommandReload({ paneId, machineId, agent, cwd, id: skillsReloaded });
-  } else if (skillsReloaded !== null && commandReload.id !== skillsReloaded) {
-    setCommandReload({ ...commandReload, id: skillsReloaded });
+    setCommandReload({ paneId, machineId, agent, cwd, id: skillsReloaded, shown: skillsReloaded, sequence: 0 });
+  } else if (commandReload.shown !== skillsReloaded) {
+    setCommandReload({ ...commandReload, shown: skillsReloaded,
+      ...(skillsReloaded !== null ? { id: skillsReloaded, sequence: commandReload.sequence + 1 } : {}) });
   }
   const [files, setFiles] = useState<string[]>([]);
   const [slashUsage, setSlashUsage] = useState<Record<string, number>>(readSlashUsage);
@@ -385,7 +386,7 @@ export function Composer({
       // A read from before a disconnect or scope change cannot refill the shared cache.
       cancelPaneCommandRequests(paneId, machineId);
     };
-  }, [paneId, machineId, agent, cwd, commandReload.id, connected, fetchPaneCommands]);
+  }, [paneId, machineId, agent, cwd, commandReload.sequence, connected, fetchPaneCommands]);
 
   useEffect(() => {
     const request = ++fileRequest.current;

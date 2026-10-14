@@ -7,24 +7,29 @@ import { discoverHermesSkills, hermesCommands, hermesNativeFeatures, readHermesF
 import { paneCommands } from "./commands.ts";
 
 const directories: string[] = [];
+/** Allocate an isolated fixture root and register it for afterEach removal. */
 function temp(): string {
   const path = mkdtempSync(join(tmpdir(), "hermes-discovery-"));
   directories.push(path);
   return path;
 }
 afterEach(() => { for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }); });
+/** Write a fixture file after creating its parent directories. */
 function put(path: string, content: string): void {
   mkdirSync(join(path, ".."), { recursive: true });
   writeFileSync(path, content);
 }
+/** Create a minimal native skill with optional YAML metadata and return its bundle directory. */
 function skill(root: string, name: string, description = name, extra = ""): string {
   const dir = join(root, name);
   put(join(dir, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n${extra}\n---\nBody\n`);
   return dir;
 }
+/** Supply modern native discovery facts without reading the user's profile or process environment. */
 function context(home = temp()): HermesCommandContext {
   return { home, userHome: home, env: {}, legacy: false, scannerVersion: "test-scanner", coreCommands: new Set(["retry", "status", "reset"]), docker: false, s6: false };
 }
+/** Write a native scan attestation for a SKILL.md-only bundle and return the cache file for later mutation. */
 function approve(dir: string, ctx: HermesCommandContext, verdict = "safe"): string {
   const digest = createHash("sha256").update("SKILL.md\0").update(readFileSync(join(dir, "SKILL.md"))).digest("hex");
   const source = createHash("sha256").update("project-local\0").digest("hex").slice(0, 16);

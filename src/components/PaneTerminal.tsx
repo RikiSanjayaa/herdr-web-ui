@@ -144,6 +144,11 @@ function storedDirectTyping(): boolean {
 /** The last refused Send now note per pane, kept across that pane's mounts (see queueError). */
 const heldRowNotes = new Map<string, { owner: string; id: string; text: string }>();
 
+/**
+ * Own one xterm renderer and the selected PC/pane's attach or read-only watch while drawing its terminal and chat lenses.
+ * Reset the renderer only on pane changes, acknowledge parsed output, and keep disconnected input in a user-reviewed draft.
+ * The active pane alone may take focus; observe and mirrored grids adopt server geometry instead of resizing the shared terminal.
+ */
 export function PaneTerminal({
   paneId,
   restoreError = null,

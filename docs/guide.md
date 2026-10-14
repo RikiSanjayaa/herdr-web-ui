@@ -165,9 +165,10 @@ Ink `/status` shows the native pager's current page with **Previous page**, **Ne
 (when another page exists), and **Close**. These are live terminal-backed cards, not persisted
 transcript turns. Unknown layouts still require Terminal. Other built-ins remain terminal-only.
 `/reload-skills` shows the native reload result with the same classic dismiss or Ink pager controls.
-After a recognized successful reload, Chat refreshes command suggestions for that pane and PC
-without a page reload. Added and removed skills appear in the native result; failed reloads do
-not trigger a refresh.
+After each recognized successful reload, Chat refreshes command suggestions and transcript skill
+matching for that pane and PC without a page reload, even when the result text is unchanged.
+Dismissal does not cancel an in-flight refresh. Added and removed skills appear in the native
+result; failed reloads do not trigger a refresh.
 `/version` shows the native version and installation diagnostics, including any native update-status
 message. Classic CLI uses **Dismiss**; Ink uses its native pager controls. It does not install updates.
 `/profile` shows the selected native profile and home, with classic **Dismiss** or Ink pager controls.

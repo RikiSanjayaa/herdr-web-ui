@@ -409,6 +409,11 @@ export interface ServerInstance {
   stop: () => void;
 }
 
+/**
+ * Start the HTTP/WebSocket bridge and its status, conversation and attachment services using optional injected dependencies.
+ * Return the bound address, readiness/alert handles and a stop handle that releases observers and attachments before closing Bun.
+ * Tests must pass an isolated stateDir; omitted options use the installation's environment and persistent state.
+ */
 export function createServer(
   options: {
     port?: number;
@@ -599,6 +604,7 @@ export function createServer(
     clearDraft?: string, confirmation?: { draft: string; identity: PendingIdentity }): Promise<void> {
     let clearedDraft = false;
     let hermes = false;
+    /** Recheck this send's live authorization and deadline before typing any remaining input. */
     const inTime = (reserve = 0): void => {
       authorize();
       if (Date.now() - arrivedAt > (options.submitDeadlineMs ?? SUBMIT_DEADLINE_MS) - reserve) {
@@ -1173,6 +1179,10 @@ export function createServer(
     return created;
   }
 
+  /**
+   * Wait for the previous attach to retire, resolve the pane's terminal, then register one PTY or mirrored attachment.
+   * Observer-first and mirrored attaches use the pane's grid; PTY failures remove the placeholder, while retries retain its clients.
+   */
   async function spawnAttachment(paneId: string, cols: number, rows: number, forObserver: boolean): Promise<PaneAttachment> {
     await retiringAttachments.get(paneId);
     const mirrored = !(await terminalAttach());
@@ -1271,6 +1281,10 @@ export function createServer(
     };
     /** the terminal attached to: a pane keeps its id across a server handoff, its terminal does not */
     let attachedTerminal = terminalId;
+    /**
+     * Start an attach attempt with the shared grid and only a still-authorized explicit takeover request.
+     * Hold setup/refusal output until readiness is known, then handle exit through bounded retries or terminal handoff lookup.
+     */
     const start = (): PtySession => {
       let takingOver = mayTakeOver(takeover) ? takeover : null;
       takeover = null;
@@ -1289,6 +1303,7 @@ export function createServer(
         const data = outputTail.flush(taken);
         if (data) forward(data);
       };
+      /** Forward pane bytes while holding a possible refusal tail only until its bounded flush deadline. */
       const publish = (data: string): void => {
         clearTimeout(tailTimer);
         const visible = outputTail.push(data);
@@ -1669,10 +1684,13 @@ export function createServer(
     port: options.port ?? (envPort ? Number(envPort) : DEFAULT_PORT),
     hostname,
 
+    /**
+     * Wait for Portal cleanup, enforce access/origin/read-only gates, then dispatch bridge, machine, WS and API routes before public files.
+     * Compress eligible responses; successful WebSocket upgrades return no HTTP response.
+     */
     async fetch(request, bunServer) {
       const startup = portalStartupResult ?? await portalStartup;
       if (!startup.ok) return compressResponse(request, errorResponse(startup.error));
-      // the route's answer, gzipped for a browser that takes it (server/compress.ts)
       return compressResponse(request, await (async (): Promise<Response | undefined> => {
       const url = new URL(request.url);
       let { pathname } = url;

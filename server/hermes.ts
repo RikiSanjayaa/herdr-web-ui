@@ -117,6 +117,7 @@ export function hermesDbPath(hermesHome = defaultHermesHome()): string {
 const processHomes = new Map<string, { home: string | null; startedAt: number; at: number }>();
 const PROCESS_HOME_TTL_MS = 30_000;
 
+/** Recheck a PID's start time so exited or reused processes cannot supply identity. */
 function sameProcessLifetime(pid: number, startedAt: number): boolean {
   const current = processStartedAt(pid);
   return current !== null && Math.abs(current - startedAt) <= (process.platform === "darwin" ? 1000 : 0);
@@ -174,6 +175,7 @@ export function isHermesProcess(entry: { name?: string; argv0?: string | null; a
 
 interface HermesProcess { pid: number; name?: string; argv0?: string | null; argv?: string[] | null; cwd?: string | null }
 
+/** Recognize Python's gateway module launch, excluding script and inline-code arguments. */
 function isTuiGateway(process: HermesProcess): boolean {
   const args = process.argv ?? [];
   const executable = (args[0] ?? "").replaceAll("\\", "/").split("/").at(-1)!;
@@ -187,9 +189,10 @@ function isTuiGateway(process: HermesProcess): boolean {
   return false;
 }
 
-/** Read native environment only on the server; never serialize it in an HTTP response. */
+/** Run bounded asynchronous process queries without blocking the server's event loop. */
 const run = promisify(execFile);
 
+/** Read the process's own environment on supported hosts; keep credentials server-side. */
 async function hermesProcessEnvironment(pid: number): Promise<Record<string, string> | null> {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
@@ -228,30 +231,41 @@ async function hermesProcessEnvironment(pid: number): Promise<Record<string, str
   return null;
 }
 
-/** Bind an Ink session to an owned gateway PID and its exact process lifetime. */
-export function hermesRuntimeSession(home: string, processes: readonly HermesProcess[]): string | null {
+/** Match one registry against captured gateway starts; callers must revalidate lifetimes before use. */
+function hermesRuntimeSessionAt(home: string, gatewayStarts: ReadonlyMap<number, number>): string | null {
   try {
     const file = join(home, "runtime", "active_sessions.json");
     const registry = JSON.parse(readHermesFile(file).toString("utf8")) as { entries?: unknown };
     if (!Array.isArray(registry.entries)) return null;
     const sessions = new Set<string>();
-    for (const gateway of processes.filter(isTuiGateway)) {
-      if (!Number.isSafeInteger(gateway.pid) || gateway.pid <= 0) continue;
-      const startedAt = processStartedAt(gateway.pid);
-      if (startedAt === null) continue;
+    for (const [pid, startedAt] of gatewayStarts) {
       for (const entry of registry.entries) {
         if (entry === null || typeof entry !== "object") continue;
-        if (entry.pid !== gateway.pid || entry.surface !== "tui" || typeof entry.process_start_time !== "number"
+        if (entry.pid !== pid || entry.surface !== "tui" || typeof entry.process_start_time !== "number"
           || !Number.isFinite(entry.process_start_time) || Math.abs(entry.process_start_time * 1000 - startedAt) > (process.platform === "darwin" ? 1000 : 10)) continue;
         if (typeof entry.session_id === "string" && /^[\w:.-]{1,200}$/.test(entry.session_id)) sessions.add(entry.session_id);
       }
-      if (!sameProcessLifetime(gateway.pid, startedAt)) return null;
     }
     return sessions.size === 1 ? sessions.values().next().value! : null;
   } catch { return null; }
 }
 
-/** Resolve selected-process home, source dialect and environment without executing native code. */
+/** Bind a standalone transcript lookup to a gateway's start and recheck it after reading the registry. */
+export function hermesRuntimeSession(home: string, processes: readonly HermesProcess[]): string | null {
+  const gatewayStarts = new Map<number, number>();
+  for (const gateway of processes) {
+    if (!isTuiGateway(gateway) || !Number.isSafeInteger(gateway.pid) || gateway.pid <= 0) continue;
+    const startedAt = processStartedAt(gateway.pid);
+    if (startedAt !== null) gatewayStarts.set(gateway.pid, startedAt);
+  }
+  const session = hermesRuntimeSessionAt(home, gatewayStarts);
+  for (const [pid, startedAt] of gatewayStarts) {
+    if (!sameProcessLifetime(pid, startedAt)) return null;
+  }
+  return session;
+}
+
+/** Resolve a proven profile using one gateway-start snapshot, then recheck native and launcher lifetimes. */
 export async function paneHermesCommandContext(paneId: string, configuredHome?: string): Promise<HermesCommandContext | null> {
   const info = await paneProcessInfo(paneId).catch(() => null);
   const processes = info?.foreground_processes ?? [];
@@ -290,7 +304,9 @@ export async function paneHermesCommandContext(paneId: string, configuredHome?: 
       } finally { profiles.closeSync(); }
     } catch { /* No named profiles. */ }
     const terminal = hermesTerminalId(launcher.pid);
-    const matches = candidates.filter(candidate => hermesRuntimeSession(candidate, processes)
+    const gatewayStarts = new Map<number, number>();
+    if (gateways.length === 1) gatewayStarts.set(native.pid, startedAt);
+    const matches = candidates.filter(candidate => hermesRuntimeSessionAt(candidate, gatewayStarts)
       || (terminal && launcher.cwd && hermesBreadcrumbSession(candidate, terminal, launcher.cwd, launcherStartedAt)));
     home = matches.length === 1 ? matches[0] : undefined;
   }

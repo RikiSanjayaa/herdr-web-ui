@@ -35,6 +35,7 @@ const claudeBackgroundApproval = (selected: number, footer = CLAUDE_BACKGROUND_A
 
 // Sanitized shapes captured from Hermes Ink's native help panel and status pager.
 const hermesHelpOutput = "│ TUI │\n│ /logs Show recent gateway log lines │\n│ Hotkeys │\n│ Ctrl+C copy selection / clear draft / interrupt / exit │\n│ Tab apply completion │\n╰──────────────────────────────────╯\n─ ready │ test model │ 1 session\n❯";
+/** Render an Ink pager with optional final-page and wrapped hints, plus an excluded backdrop. */
 function hermesStatusOutput(body = "Model: test-model\nTokens: 0", end = false, wrapped = false): string {
   const hint = end ? "end · ↑↓/jk · b/PgUp back · g top · Esc/q close (9 lines)" : "↑↓/jk line · Enter/Space/PgDn page · b/PgUp back · g/G top/bottom · Esc/q close (5/9)";
   const hints = wrapped ? [hint.slice(0, 48), hint.slice(48)] : [hint];
@@ -42,7 +43,9 @@ function hermesStatusOutput(body = "Model: test-model\nTokens: 0", end = false, 
 }
 const hermesClassicStatus = "Hermes CLI Status\nSession ID: test-session\nPath: /tmp/test-home\nModel: test-model (custom)\nTokens: 0\nAgent Running: No";
 const hermesClassicHelp = "/reload-skills - Re-scan skills\n── Exit ──\n/quit - Exit the CLI\nTip: /help skills lists skill commands · /help <text> filters · Ctrl+P opens the command palette\nMulti-line: Ctrl+J, Alt+Enter, or \\\\+Enter for a new line\nDraft editor: Ctrl+G (Alt+G in VSCode/Cursor)\nPaste image: Alt+V (or /paste)";
+/** Place classic command output above a status bar and a composer that already contains a draft. */
 const hermesClassicOutput = (body: string) => `${body}\n⚕ test-model │ ctx -- │ 2s\n────────────────────────────────\n❯ Research this topic\n────────────────────────────────`;
+/** Render classic command output above its native composer, empty unless a draft is supplied. */
 const hermesClassicReadyOutput = (body: string, draft = "") => `${body}\n⚕ test-model │ ctx -- │ 2s\n────────────────────────────────\n❯${draft ? " " + draft : ""}\n────────────────────────────────`;
 
 describe("Hermes native informational output", () => {
@@ -273,12 +276,14 @@ describe("Hermes native informational output", () => {
   });
 });
 
+/** Render a classic approval with independently mutable cursor, countdown, warning and tool progress. */
 function hermesClassicApproval(at = 0, command = "echo '...' > AGENTS.md", detail = "Write to protected agent-instruction files...approval always required", choices = ["Allow once", "Deny"], seconds = 240, spinner = "⠋", toolProgress?: string): string {
   const content = ["⚠️  Dangerous Command", "", ...command.split("\n"), "", ...choices.map((label, index) => `${at === index ? "❯" : " "} ${index + 1}. ${label}`), "", ...detail.split("\n")];
   const postModal = toolProgress !== undefined ? [`  ${toolProgress}`] : [];
   return [`╭${"─".repeat(74)}╮`, ...content.map((line) => `│ ${line.padEnd(72)} │`), `╰${"─".repeat(74)}╯`, "", ...postModal, `  ↑/↓ to select, Enter to confirm  (${seconds}s)`, ` ⚕ smoke-model │ ctx -- │ [░░░░░░░░░░] -- │ 5s │ ${spinner} 0s`, "────────────────────────────────", "⚠ ❯", "────────────────────────────────"].join("\n");
 }
 
+/** Render an Ink approval with its in-panel key hint and a mutable background spinner. */
 function hermesTuiApproval(at = 0, command = "echo '...' > AGENTS.md", warning = "warning", choices = ["Allow once", "Deny"], spinner = "⠋"): string {
   const content = [`⚠ Approval required · ${warning}`, ...command.split("\n"), "", ...choices.map((label, index) => `${at === index ? "▸" : " "} ${index + 1}. ${label}`), `↑/↓ select · Enter confirm · 1-${choices.length} quick pick · Esc/Ctrl+C deny`];
   return [`╔${"═".repeat(98)}╗`, ...content.map((line) => `║ ${line.padEnd(96)} ║`), `╚${"═".repeat(98)}╝`, "", `─ ~/app │ smoke-model │ ${spinner} approval needed ─`].join("\n");
@@ -3516,14 +3521,53 @@ describe("an answer and the menu it was made for", () => {
       hermesClassicApproval(0, undefined, ""),
       hermesClassicApproval().replace("╰──", "╰─"),
       hermesTuiApproval().split("\n").filter(line => !line.startsWith("╚")).join("\n"),
+      hermesClassicApproval().replace("Dangerous Command", "Unreadable caption"),
+      hermesClassicApproval().replace("(240s)", "(unreadable countdown)"),
+      hermesClassicApproval().replace("Enter to confirm  (240s)", "Enter to confirm\n  (unreadable countdown)"),
+      hermesTuiApproval().replace("⚠ Approval required · warning", "Unreadable caption"),
+      hermesTuiApproval().replace("quick pick", "unreadable hint"),
+      hermesTuiApproval().replace(/^║.*echo.*$/m, "unreadable command row").replace("quick pick", "unreadable hint"),
+      hermesTuiApproval(0, "echo safe\n… (command truncated)"),
       hermesStatusOutput().split("\n").slice(0, -1).join("\n"),
+      hermesStatusOutput().replace("╚══", "╚═"),
+      hermesStatusOutput().replace("Status", "Logs"),
+      hermesStatusOutput().replace("Esc/q close", "unreadable close hint"),
+      hermesStatusOutput().replace(/^║.*Model:.*$/m, "unreadable status row").replace("Esc/q close", "unreadable close hint"),
       hermesStatusOutput("No changes.", true).replace("Status", "Diff"),
       hermesStatusOutput("Context details", true).replace("Status", "Context"),
     ];
     for (const screen of screens) {
       await withPane("hermes", "blocked", screen, async pane => {
         promptWaitEnded("p_1");
+        expect(parseInteractivePrompt("hermes", screen)).toBeNull();
         expect(await card()).toBeNull();
+        expect(pane.sent).toEqual([]);
+      });
+    }
+  });
+
+  test("does not let nearby quoted native chrome hide an unrelated bottom question", async () => {
+    const quotes = [
+      "The old log said Dangerous Command before continuing.",
+      "Quoted warning: ⚠ Approval required · write permission",
+      "Old footer: ↑/↓ to select, Enter to confirm (240s)",
+      "Old footer: ↑/↓ select · Enter confirm · 1-2 quick pick · Esc/Ctrl+C deny",
+      "║ Status ║",
+      "║ Diff ║",
+      "║ Context ║",
+      "Old pager: Esc/q close (5/9)",
+      hermesClassicApproval(),
+      hermesTuiApproval(),
+      hermesStatusOutput(),
+      hermesStatusOutput("No changes.", true).replace("Status", "Diff"),
+      hermesStatusOutput("Context details", true).replace("Status", "Context"),
+    ];
+    for (const quote of quotes) {
+      await withPane("hermes", "blocked", `${quote}\nContinue with the unrelated task? (y/n)`, async pane => {
+        promptWaitEnded("p_1");
+        const shown = (await card())!;
+        expect(shown.fallback).toBe(true);
+        expect(labels(shown)).toContain("Enter");
         expect(pane.sent).toEqual([]);
       });
     }

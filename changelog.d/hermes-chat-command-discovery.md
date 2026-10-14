@@ -15,6 +15,12 @@
 ### Fixed
 - Hermes `/profile` cards handle redraws that place the command echo inside or after the result;
   ambiguous earlier results remain in Terminal.
+- Repeated Hermes skill reloads refresh suggestions and transcript chips even when the native
+  result text is identical; dismissing a result leaves its inventory refresh running.
+- Stale Hermes approval or pager text above a new question no longer hides the fallback card.
+  Active unreadable native panels still require Terminal.
+- Hermes profile discovery reuses gateway start-time evidence across candidate profiles and
+  rechecks process lifetimes before returning the selected profile.
 - Plain text inside Markdown emphasis and links avoids unnecessary delimiter-scanner allocations
   without changing parsed content.
 - Displaced terminal attachments hold takeover diagnostics until exit can confirm the refusal,

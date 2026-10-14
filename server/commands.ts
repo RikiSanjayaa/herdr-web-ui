@@ -144,6 +144,10 @@ function piTemplates(root: string, source: SlashCommand["source"]): SlashCommand
   return result;
 }
 
+/**
+ * Build suggestions from agent built-ins and the native resources supported here; unknown agents return none.
+ * Hermes profile resources require selected-process context, and pi project resources are omitted without trust proof.
+ */
 export function paneCommands(
   agent: string | null | undefined,
   cwd: string | null | undefined,

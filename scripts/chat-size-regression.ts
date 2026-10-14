@@ -503,6 +503,7 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
           listeners.add(check); check();
         });
         const routed = queueScenario || scenario === "writes" || scenario === "held";
+        /** Read captured frames from the routed socket or the browser's live recording. */
         const recorded = async (): Promise<Frame[]> => {
           if (routed) return [...wire];
           assert.ok(page);
