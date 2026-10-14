@@ -28,6 +28,7 @@ import { assertCspClean, watchCsp } from "./csp-violations.ts";
 import type { CspWatch } from "./csp-violations.ts";
 import { browserEvidencePage, browserEvidenceTracing, startBrowserEvidence } from "./browser-evidence.ts";
 import type { BrowserEvidenceSession } from "./browser-evidence.ts";
+import { chromePath } from "./chrome-path.ts";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-web-ui-browser-")));
 const workspaces: string[] = [];
@@ -83,7 +84,7 @@ try {
   server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "push"), usage: new UsageService(undefined, []) });
   const origin = `http://127.0.0.1:${server.port}`;
   browser = await chromium.launch({
-    executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome",
+    executablePath: chromePath(),
     // English whatever the machine's own languages are (macOS Chrome takes them from the system)
     headless: true, args: ["--no-sandbox", "--accept-lang=en-US"],
   });
@@ -1967,14 +1968,18 @@ try {
 
   // Server-owned Send now drops the old suggestion itself, before a delayed prompt read returns.
   await selectPane(pendingPane);
+  await page.keyboard.press("ControlOrMeta+Shift+Comma");
+  await openSettingsPage(page, "Chat");
+  await page.getByRole("switch", { name: "Send queued messages automatically", exact: true }).uncheck();
+  await page.getByRole("button", { name: "Close settings", exact: true }).click();
   await reportPending("working");
   await page.locator('.composer-status[data-status="working"]').waitFor();
   await pendingReady(pendingPane);
   await composer.fill("# queued before the suggestion");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await until(async () => await pendingRows.count() === 1, "suggestion test pending input accepted");
-  // A pane switch ends this item's automatic lease. Claude's ready-only suggestion
-  // can then appear beside the retained server-owned item without auto-dispatching it.
+  // Explicit hold keeps the suggestion beside a server-owned item without dispatching it.
+  // Navigation preserves its held state and the same PC connection's recovery actions.
   await selectPane(paneA); await selectPane(pendingPane);
   await page.locator('.pending-message[data-state="held"]').waitFor();
   await pendingReady(pendingPane);
@@ -1994,6 +1999,10 @@ try {
   await pendingRows.waitFor({ state: "hidden" });
   await page.unroute(`**/api/pane/prompt?pane_id=${encodeURIComponent(pendingPane)}`);
   await herdrRpc("pane.send_text", { pane_id: pendingPane, text: "\u0003" });
+  await page.keyboard.press("ControlOrMeta+Shift+Comma");
+  await openSettingsPage(page, "Chat");
+  await page.getByRole("switch", { name: "Send queued messages automatically", exact: true }).check();
+  await page.getByRole("button", { name: "Close settings", exact: true }).click();
   await workspaceClose(pendingWorkspace.workspace.workspace_id);
   workspaces.splice(workspaces.indexOf(pendingWorkspace.workspace.workspace_id), 1);
   await selectPane(paneA);
@@ -2125,6 +2134,16 @@ try {
   await mobilePage.locator(`.pane-select[title^="${paneB} —"]`).click();
   await mobilePage.getByRole("textbox", { name: "Message", exact: true }).waitFor();
   console.log("PASS a pane picked on a phone waits for a tap before raising the keyboard");
+
+  // Escape with the drawer open closes it and reaches nothing else, wherever the focus is
+  await mobilePage.evaluate(() => { (window as unknown as { escapes: number }).escapes = 0; window.addEventListener("keydown", (e) => { if (e.key === "Escape") (window as unknown as { escapes: number }).escapes++; }); });
+  await mobilePage.locator('button[aria-controls="workspace-drawer"]').click();
+  await mobilePage.locator("#workspace-drawer.is-open").waitFor();
+  await mobilePage.getByRole("textbox", { name: "Message", exact: true }).focus();
+  await mobilePage.keyboard.press("Escape");
+  await mobilePage.locator("#workspace-drawer.is-open").waitFor({ state: "detached" });
+  assert.equal(await mobilePage.evaluate(() => (window as unknown as { escapes: number }).escapes), 0, "Escape that closes the drawer does not reach the page");
+  console.log("PASS Escape closes a phone's drawer and goes no further");
 
   // Claude's suggestion on a phone is the placeholder and a chip that fills the box, until Settings turns the chip off
   const promptRoute = `**/api/pane/prompt?pane_id=${encodeURIComponent(paneB)}`;

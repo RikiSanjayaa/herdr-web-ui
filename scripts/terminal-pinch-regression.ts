@@ -7,6 +7,7 @@ import { chromium } from "playwright-core";
 import { createServer } from "../server/index.ts";
 import { workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
 import { UsageService } from "../server/usage.ts";
+import { chromePath } from "./chrome-path.ts";
 
 async function until(check: () => boolean | Promise<boolean>, label: string): Promise<void> {
   const deadline = Date.now() + 10_000;
@@ -234,7 +235,7 @@ if (import.meta.main) {
   try {
     const made = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-terminal-pinch", focus: false });
     workspace = made.workspace.workspace_id;
-    browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+    browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
     await checkTerminalPinch(browser, `http://127.0.0.1:${server.port}`, made.root_pane.pane_id);
   } finally {
     await browser?.close(); server.stop();

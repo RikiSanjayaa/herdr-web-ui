@@ -9,15 +9,15 @@
  * - omp: herdr's agent.get hands us the session jsonl path outright under
  *   ~/.omp/agent/sessions/<cwd-slug>/, or ~/.omp/profiles/<name>/agent/sessions/<cwd-slug>/
  *   for `omp --profile <name>` — same shape of truth, one less hop. When herdr names none, the
- *   pane's omp process does, as gjc's does (omp.ts).
+ *   pane's omp process does (omp.ts).
  * - omo: herdr knows nothing about its store and its label for the pane flips
  *   between `pi` and `claude` as omo spawns model CLIs, so the pane's process
  *   tree routes it and process/session evidence selects a unique transcript
  *   under <its agent dir>/sessions/<cwd-slug>/ (~/.omo/agent unless the process
  *   moved it with OMO_CODING_AGENT_DIR). It writes omp's session shape, so
  *   parseOmpTranscript (transcript-records.ts) reads it.
- * - gjc: an open session file or fresh native terminal breadcrumb belonging to
- *   its process (gjc-runtime.ts). It writes omp's session shape too.
+ * - gjc: the public SDK broker binds its live pane process to the exact saved
+ *   session transcript (gjc-sdk.ts, gjc-runtime.ts). It writes omp's session shape too.
  * - pi: herdr's agent.get names the session jsonl outright under
  *   ~/.pi/agent/sessions/<cwd-slug>/ (pi.ts). Its records are the session shape
  *   parseOmpTranscript reads, but its file is an entry tree, not a log: /tree
@@ -42,7 +42,7 @@ import { herdrRpc, paneRead, sessionSnapshot } from "./herdr/client.ts";
 import { codexHistorySegments, createCodexTranscriptParser, codexOutputText, codexTranscriptPath, defaultCodexHome, forgetAllCodexState, forgetCodexStateFor, paneCodexHome, parseCodexTranscript, readRange } from "./codex.ts";
 import { CODEX_IMAGE_REF, codexTranscriptImage } from "./codex-images.ts";
 import { AmbiguousClaudeStore, claudeProcessSession, claudeTranscriptFile, defaultClaudeConfigDir, forgetClaudeSessionFile, forgetClaudeSessions, isClaudeProcess, processClaudeConfigDir } from "./claude-store.ts";
-import { forgetGjcPane, forgetGjcState, gjcPidUnderShell, gjcTranscriptForPane, isGjcProcess, storeRelative } from "./gjc-runtime.ts";
+import { forgetGjcState, gjcPidUnderShell, gjcTranscriptForPane, isGjcProcess, storeRelative } from "./gjc-runtime.ts";
 import { isOmoProcess, omoSessionForPane } from "./omo.ts";
 import { processStartedAt } from "./process-start.ts";
 import { ompHeldTranscript } from "./omp.ts";
@@ -1036,7 +1036,6 @@ export function forgetPaneTranscriptState(paneId: string): void {
   const reads = paneReads.get(paneId);
   paneReads.delete(paneId);
   launchedAgents.forget(paneId);
-  forgetGjcPane(paneId);
   if (reads === undefined) return;
   // two panes can read one transcript (a resumed session, a shared store): what another pane
   // still reads stays

@@ -290,6 +290,9 @@ export const KO: Record<string, string> = {
   "Delete": "삭제",
   "Delete anyway": "그래도 삭제",
   "{n} panes and {m} worktree workspaces close with it; the agents in them stop, and the checkouts stay.": "패널 {n}개와 워크트리 워크스페이스 {m}개가 함께 닫히고, 안의 에이전트가 멈춥니다. 체크아웃은 남습니다.",
+  "{n} pane and {m} worktree workspaces close with it; the agents in them stop, and the checkouts stay.": "패널 {n}개와 워크트리 워크스페이스 {m}개가 함께 닫히고, 안의 에이전트가 멈춥니다. 체크아웃은 남습니다.",
+  "{n} panes and {m} worktree workspace close with it; the agents in them stop, and the checkout stays.": "패널 {n}개와 워크트리 워크스페이스 {m}개가 함께 닫히고, 안의 에이전트가 멈춥니다. 체크아웃은 남습니다.",
+  "{n} pane and {m} worktree workspace close with it; the agents in them stop, and the checkout stays.": "패널 {n}개와 워크트리 워크스페이스 {m}개가 함께 닫히고, 안의 에이전트가 멈춥니다. 체크아웃은 남습니다.",
   "Enlarge diagram": "다이어그램 확대",
   "Diagram": "다이어그램",
   "Zoom in": "확대",
@@ -298,6 +301,7 @@ export const KO: Record<string, string> = {
   "Close": "닫기",
   "Close workspace {name}?": "워크스페이스 {name}을(를) 닫을까요?",
   "{n} panes close with it, and the agents in them stop.": "패널 {n}개가 함께 닫히고, 안의 에이전트가 멈춥니다.",
+  "{n} pane closes with it, and the agent in it stops.": "패널 {n}개가 함께 닫히고, 안의 에이전트가 멈춥니다.",
   "Rename failed: {reason}": "이름 바꾸기 실패: {reason}",
   "Reorder failed: {reason}": "순서 바꾸기 실패: {reason}",
 

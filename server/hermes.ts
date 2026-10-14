@@ -6,7 +6,7 @@ import { isAbsolute, join } from "node:path";
 import { readFile, stat } from "node:fs/promises";
 
 import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPane } from "../shared/protocol.ts";
-import { herdrRpc } from "./herdr/client.ts";
+import { agentGet, paneProcessInfo } from "./herdr/client.ts";
 import { answerVersion, ConversationNotStarted, ConversationUnavailable, type ConversationPage, HistoryChanged, type RecognizedConversation, TRANSCRIPT_WINDOW_BYTES } from "./conversation.ts";
 import { toolSummary } from "./transcript-records.ts";
 import { TOOL_OUTPUT_CHARS, trimOutput } from "./tool-output.ts";
@@ -185,21 +185,16 @@ export async function hermesTranscriptForPane(
     : null;
 
   if (sessionId === null) {
-    const info = await herdrRpc<{ agent: { agent_session?: { value?: unknown } } }>(
-      "agent.get",
-      { target: paneId },
-    ).catch(() => null);
-    if (typeof info?.agent?.agent_session?.value === "string" && info.agent.agent_session.value.length > 0) {
-      sessionId = info.agent.agent_session.value;
+    const info = await agentGet(paneId).catch(() => null);
+    if (typeof info?.agent_session?.value === "string" && info.agent_session.value.length > 0) {
+      sessionId = info.agent_session.value;
     }
   }
 
-  let hermesProcess: { pid: number; name?: string; argv0?: string; argv?: string[] } | undefined;
+  let hermesProcess: { pid: number; name?: string; argv0?: string | null; argv?: string[] | null } | undefined;
   if (configuredHome === undefined || sessionId === null) {
-    const processInfo = await herdrRpc<{
-      process_info?: { foreground_processes?: { pid: number; name?: string; argv0?: string; argv?: string[] }[] };
-    }>("pane.process_info", { pane_id: paneId }).catch(() => null);
-    hermesProcess = (processInfo?.process_info?.foreground_processes ?? []).find(isHermesProcess);
+    const processInfo = await paneProcessInfo(paneId).catch(() => null);
+    hermesProcess = (processInfo?.foreground_processes ?? []).find(isHermesProcess);
   }
 
   const processHome = configuredHome === undefined && hermesProcess !== undefined

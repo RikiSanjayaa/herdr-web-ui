@@ -7,6 +7,7 @@ import { chromium } from "playwright-core";
 import { build as viteBuild } from "vite";
 import { transcriptPage } from "../server/conversation.ts";
 import type { ConversationResponse } from "../shared/protocol.ts";
+import { chromePath } from "./chrome-path.ts";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-math-browser-")));
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
@@ -42,7 +43,7 @@ try {
     return new Response(Bun.file(join(output, path === "/" ? "index.html" : path.slice(1))));
   } });
 
-  browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+  browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
   const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
   const errors: string[] = [];
   const scripts: string[] = [];

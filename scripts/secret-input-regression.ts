@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { chromium, type Browser } from "playwright-core";
 import { createServer } from "../server/index.ts";
 import { paneSendText, workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
+import { chromePath } from "./chrome-path.ts";
 
 /** Only owned no-echo fixtures; assert delivery without storing the entered value. */
 export async function checkSecretInput(browser: Browser, origin: string): Promise<void> {
@@ -152,7 +153,7 @@ process.stdin.on("data", chunk => {
 if (import.meta.main) {
   const root = mkdtempSync(join(tmpdir(), "herdr-secret-browser-"));
   const server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: root });
-  const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+  const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
   try { await checkSecretInput(browser, `http://127.0.0.1:${server.port}`); }
   finally { await browser.close(); server.stop(); rmSync(root, { recursive: true, force: true }); }
 }

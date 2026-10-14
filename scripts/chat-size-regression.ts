@@ -8,6 +8,7 @@ import { chromium } from "playwright-core";
 import { createServer } from "../server/index.ts";
 import { PtySession } from "../server/pty/session.ts";
 import { herdrRpc, herdrSocketPath, type WorkspaceCreateResult, paneRead, paneSendKeys, paneSendText, workspaceClose, workspaceCreate } from "../server/herdr/client.ts";
+import { chromePath } from "./chrome-path.ts";
 
 /** how long a resize that should not happen gets to show up */
 const NO_RESIZE_WAIT_MS = 400;
@@ -501,7 +502,7 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
           };
           listeners.add(check); check();
         });
-        const routed = queueScenario || scenario === "writes";
+        const routed = queueScenario || scenario === "writes" || scenario === "held";
         const recorded = async (): Promise<Frame[]> => {
           if (routed) return [...wire];
           assert.ok(page);
@@ -549,7 +550,7 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
         }
         page = await openRecording(browser, contexts, origin, scenario === "held" ? heldPane : first,
           { viewport: { width: 1000, height: 700 } }, { language: "en", defaultView: queueScenario ? "chat" : "terminal", releasePaneAway: true },
-          scenario === "mount", queueScenario || scenario === "writes" ? setup : undefined);
+          scenario === "mount", routed ? setup : undefined);
         if (scenario === "held") {
           await page.getByText("Another app has this pane open.", { exact: false }).waitFor();
           await pauseClock(page);
@@ -562,6 +563,8 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
           await page.locator(".terminal-banner", { hasText: "View only while you use another window" }).waitFor();
           assert.ok(holder);
           await stopHolder(holder);
+          // Input readiness must restore typing even while the new stream is delayed.
+          holdOutput = true;
           await page.evaluate(() => {
             Object.defineProperty(document, "hasFocus", { configurable: true, value: () => true });
             window.dispatchEvent(new Event("focus"));
@@ -573,9 +576,19 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
             "a fresh resume must clear the previous attach's held state");
           await page.clock.resume();
           await page.locator(".xterm-helper-textarea").focus();
-          await page.keyboard.type("z");
-          await page.waitForFunction(() => (window as unknown as { frames_: Frame[] }).frames_
-            .some((f) => f.dir === "out" && f.type === "input"), undefined, { timeout: 10_000 });
+          const typed = `held-resume-${crypto.randomUUID()}`;
+          await page.keyboard.type(typed);
+          await waitWire("out", "input");
+          const inputDeadline = Date.now() + 10_000;
+          let nativeText = "";
+          while (Date.now() < inputDeadline) {
+            nativeText = (await paneRead({ paneId: heldPane, source: "visible", format: "text" })).text.replace(/\s/g, "");
+            if (nativeText.includes(typed)) break;
+            await Bun.sleep(50);
+          }
+          assert.ok(nativeText.includes(typed), "typing after input-ready reaches the native pane before output is delivered");
+          holdOutput = false;
+          for (const send of heldOutput.splice(0)) send();
           console.log("PASS inactive attach lifecycle: held");
           continue;
         }
@@ -611,10 +624,9 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
               await page.locator(`.pane-select[title^="${next} — "]`).evaluate((button: HTMLElement) => button.click());
               await waitWire("out", "attach", 2);
               await page.locator(`.terminal-stack[data-pane-owner="${next}"]`).waitFor({ state: "attached" });
-              await waitWire("out", "detach", 1);
               await page.clock.runFor(0);
-              assert.deepEqual(detachedPanes(await recorded()), [first],
-                "navigation detaches pane A while pane B starts its own release delay");
+              assert.deepEqual(detachedPanes(await recorded()), [],
+                "navigation keeps pane A attached while its queued message waits");
               await assertSharedConnection(page);
               await waitWire("in", "input-ready", 2);
               await page.clock.runFor(900);
@@ -625,11 +637,11 @@ export async function checkInactiveAttachLifecycle(browser: Browser, origin: str
                 window.dispatchEvent(new Event("blur"));
               });
               await page.clock.runFor(100);
-              assert.deepEqual(detachedPanes(await recorded()), [first],
-                "pane A's orphaned timer cannot shorten pane B's new delay");
+              assert.deepEqual(detachedPanes(await recorded()), [],
+                "pane A's retained attach cannot shorten pane B's new delay");
               await page.clock.runFor(900);
-              await waitWire("out", "detach", 2);
-              assert.deepEqual(detachedPanes(await recorded()), [first, next], "pane B releases only after its full new delay");
+              await waitWire("out", "detach", 1);
+              assert.deepEqual(detachedPanes(await recorded()), [next], "pane B releases only after its full new delay; pane A stays for its queue");
               await assertSharedConnection(page);
             } else {
               assert.ok(releaseSubmit, "the explicit Send is waiting at the server boundary");
@@ -764,7 +776,7 @@ if (import.meta.main) {
   const server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state") });
   let browser: Browser | undefined;
   try {
-    browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox", "--accept-lang=en-US"] });
+    browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox", "--accept-lang=en-US"] });
     const origin = `http://127.0.0.1:${server.port}`;
     if (process.env.CHAT_SIZE_CASE === "reclaim") await checkFocusedWindowReclaimsTerminalSize(browser, origin);
     else if (process.env.CHAT_SIZE_CASE) await checkInactiveAttachLifecycle(browser, origin);

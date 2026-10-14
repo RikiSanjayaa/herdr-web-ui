@@ -483,12 +483,14 @@ describe("running Portal", () => {
     const portalDir = join(stateDir, "portal");
     mkdirSync(portalDir, { recursive: true, mode: 0o700 });
     const identityPath = join(portalDir, "identity.json");
-    const unrelated = Bun.spawn(["sh", "-c", "while :; do sleep 0.1; done", "sh", "expose", "--identity-path", identityPath], {
+    const readyPath = join(stateDir, "unrelated-ready");
+    const unrelated = Bun.spawn(["sh", "-c", 'printf ready > "$1"; while :; do sleep 0.1; done', "sh", readyPath, "expose", "--identity-path", identityPath], {
       stdin: "ignore", stdout: "ignore", stderr: "ignore",
     });
     writeFileSync(join(portalDir, "state.json"), JSON.stringify({ enabled: true, relay: RELAY, port: 7317, pid: unrelated.pid }));
     const service = new PortalService({ stateDir, fetch: relay() });
     try {
+      await waitFor(() => existsSync(readyPath), "unrelated process executed its command");
       await service.resume({ port: 7317, tokenSet: false, serveOnly: false });
       expect(alive(unrelated.pid)).toBe(true);
     } finally {
@@ -503,16 +505,15 @@ describe("running Portal", () => {
     mkdirSync(portalDir, { recursive: true, mode: 0o700 });
     const identityPath = join(portalDir, "identity.json");
     const scriptPath = join(portalDir, "portal");
-    writeFileSync(scriptPath, "await new Promise(() => {});\n");
+    const readyPath = join(stateDir, "interpreter-ready");
+    writeFileSync(scriptPath, `require("node:fs").writeFileSync(${JSON.stringify(readyPath)}, "ready");\nawait Promise.withResolvers().promise;\n`);
     const unrelated = Bun.spawn([process.execPath, scriptPath, "expose", "--identity-path", identityPath], {
       stdin: "ignore", stdout: "ignore", stderr: "ignore",
     });
     writeFileSync(join(portalDir, "state.json"), JSON.stringify({ enabled: true, relay: RELAY, port: 7317, pid: unrelated.pid }));
     const service = new PortalService({ stateDir, fetch: relay() });
-    const internals = service as unknown as { processArgv(pid: number): Promise<string[] | null> };
     try {
-      await waitFor(() => alive(unrelated.pid), "unrelated interpreter started");
-      expect((await internals.processArgv(unrelated.pid))?.slice(1, 3)).toEqual([scriptPath, "expose"]);
+      await waitFor(() => existsSync(readyPath), "unrelated interpreter executed its script");
       await service.resume({ port: 7317, tokenSet: false, serveOnly: false });
       expect(alive(unrelated.pid)).toBe(true);
     } finally {

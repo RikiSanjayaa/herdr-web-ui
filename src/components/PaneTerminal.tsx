@@ -464,6 +464,22 @@ export function PaneTerminal({
   const queueOwner = paneId === null ? null : paneStorageId(machineId, paneId);
   const queued = useSyncExternalStore(queueStore.subscribe, () => queueStore.read(queueOwner ?? ""));
   const pending = useSyncExternalStore(pendingMessages.subscribe, () => pendingMessages.read(queueOwner ?? ""));
+  useEffect(() => {
+    if (!paneId || !queueOwner || !submitRetention) return;
+    let release: (() => void) | undefined;
+    const retainPending = (): void => {
+      const scope = sessionRef.current?.scope ?? null;
+      const waits = pendingMessages.read(queueOwner).some((message) => pendingMessages.isOwned(queueOwner, message.id, scope)
+        && (message.state === "queued" || message.state === "sending"));
+      if (waits) release ??= submitRetention.retain(paneId);
+      else { release?.(); release = undefined; }
+    };
+    // Transfer retention before the submit promise releases its receipt claim. A React
+    // render/effect after that release would let navigation unmount the pane in between.
+    const off = pendingMessages.subscribe(retainPending);
+    retainPending();
+    return () => { off(); release?.(); };
+  }, [paneId, queueOwner, submitRetention]);
   const sendingRef = useRef(false);
   const [queueSending, setQueueSending] = useState<string | null>(null);
   // a refused Send now's note outlives this mount: a pane left for another workspace unmounts, and
@@ -1041,6 +1057,10 @@ export function PaneTerminal({
         setChatInvalidation((current) => current + 1);
       }
       if (paneRef.current) setInputReady(socket.canInput(paneRef.current));
+      if (message.type === "input-ready" && message.ready !== false) {
+        // Fresh attaches do not send attach-resumed; output may arrive later.
+        term.options.disableStdin = observeRef.current || secretRef.current !== null || heldRef.current;
+      }
       if (message.type === "pty-data") {
         if (message.pane_id !== paneRef.current || releasedRef.current) return;
         // A chat showing herdr's scrollback has no native file to watch: output invalidates it.

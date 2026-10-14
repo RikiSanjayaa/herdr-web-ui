@@ -294,6 +294,9 @@ export const ZH: Record<string, string> = {
   "Delete": "删除",
   "Delete anyway": "仍然删除",
   "{n} panes and {m} worktree workspaces close with it; the agents in them stop, and the checkouts stay.": "{n} 个窗格和 {m} 个工作树工作区会一同关闭，其中的代理会停止；检出保留。",
+  "{n} pane and {m} worktree workspaces close with it; the agents in them stop, and the checkouts stay.": "{n} 个窗格和 {m} 个工作树工作区会一同关闭，其中的代理会停止；检出保留。",
+  "{n} panes and {m} worktree workspace close with it; the agents in them stop, and the checkout stays.": "{n} 个窗格和 {m} 个工作树工作区会一同关闭，其中的代理会停止；检出保留。",
+  "{n} pane and {m} worktree workspace close with it; the agents in them stop, and the checkout stays.": "{n} 个窗格和 {m} 个工作树工作区会一同关闭，其中的代理会停止；检出保留。",
   "Enlarge diagram": "放大图表",
   "Diagram": "图表",
   "Zoom in": "放大",
@@ -302,6 +305,7 @@ export const ZH: Record<string, string> = {
   "Close": "关闭",
   "Close workspace {name}?": "关闭工作区 {name}？",
   "{n} panes close with it, and the agents in them stop.": "窗格 {n} 个会一同关闭，其中的代理会停止。",
+  "{n} pane closes with it, and the agent in it stops.": "窗格 {n} 个会一同关闭，其中的代理会停止。",
   "Rename failed: {reason}": "重命名失败：{reason}",
   "Reorder failed: {reason}": "调整顺序失败：{reason}",
 

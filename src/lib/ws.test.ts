@@ -1444,3 +1444,34 @@ it("counts a page that connected while hidden as put away until it is first show
     page.restore();
   }
 });
+
+it("ends the connection when the page is left, and connects again only when it is shown", () => {
+  jest.useFakeTimers();
+  const { client, socket } = liveClient(["submit"]);
+  let disconnects = 0;
+  client.onDisconnect(() => { disconnects++; });
+  try {
+    // a page kept in the back/forward cache would keep this socket open behind its replacement
+    globalThis.dispatchEvent(new Event("pagehide"));
+    expect(socket.readyState).toBe(3);
+    expect(disconnects).toBe(1);
+    expect(client.connected).toBe(false);
+    expect(client.canInput("w1:p1")).toBe(false);
+    // its close event arms no retry behind the page
+    socket.closeEvent(1001);
+    jest.advanceTimersByTime(60_000);
+    expect(FakeSocket.last).toBe(socket);
+    // nor does the network coming back, or a pane attaching, in the moment before the page freezes
+    globalThis.dispatchEvent(new Event("online"));
+    client.connect();
+    expect(FakeSocket.last).toBe(socket);
+    globalThis.dispatchEvent(new Event("pageshow"));
+    const next = FakeSocket.last;
+    expect(next).not.toBe(socket);
+    next.open();
+    expect(client.connected).toBe(true);
+  } finally {
+    client.close();
+    jest.useRealTimers();
+  }
+});

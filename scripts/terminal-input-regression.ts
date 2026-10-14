@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import type { Browser } from "playwright-core";
 import { openSettingsPage } from "./settings-page.ts";
+import { chromePath } from "./chrome-path.ts";
 
 export async function checkTerminalInput(browser: Browser, origin: string, pane: string, otherPane: string): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
@@ -75,6 +76,9 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     // A liveness probe refuses input without a frame to say so: on a quiet pane the 1 s poll reads
     // it, so the terminal shows it waits instead of looking ready while typing goes to the draft.
     const waiting = page.locator(".terminal-banner", { hasText: "Waiting for terminal input…" });
+    // the banner is drawn only on a connected pane: before the socket opens it is absent too, and
+    // a wake then finds nothing to probe
+    await page.locator(".conn-live").waitFor();
     await waiting.waitFor({ state: "hidden" });
     holdPings = true;
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
@@ -653,7 +657,7 @@ if (import.meta.main) {
   const root = mkdtempSync(join(tmpdir(), "herdr-input-qa-"));
   const owned: string[] = [];
   const server = createServer({ port: 0, stateDir: root, token: "" });
-  const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+  const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
   try {
     const panes: string[] = [];
     for (let i = 0; i < 2; i++) {

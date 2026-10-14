@@ -147,7 +147,7 @@ Every agent herdr runs shows up with its live status, terminal and alerts. The c
 | **Codex** | Native rollout, with tool results and commentary/final phases | ✓ approvals and questions, including queued ones, and the `/model` lists (picked for the session) |
 | **omp** | Native session file | ✓ |
 | **omo** | Native session file, found through the pane's process tree | — use Terminal |
-| **gjc** | Native session file, from the session directory gjc keeps open | — use Terminal |
+| **gjc** | Native session file identified by GJC's SDK broker and the pane's process | — use Terminal |
 | **pi** | Native session file, resolved through herdr; after `/tree`, the branch in play | ✓ its dialogs: a question, a confirmation, an answer typed in |
 | **OpenCode** | Native session in OpenCode 2's own database, resolved through herdr: `~/.local/share/opencode/opencode.db` (`%USERPROFILE%\.local\share\opencode\opencode.db` on Windows), or where the server's `XDG_DATA_HOME` or `OPENCODE_DB` puts it | — use Terminal |
 | **Devin CLI** | Native SQLite session, showing the active branch when herdr or the live process explicitly identifies the session; otherwise terminal text | — use Terminal |
@@ -169,6 +169,14 @@ before sending from Chat.
 Type `/clear` in Chat to open its native confirmation card; supported confirmations do not require a Terminal switch. Hermes command autocomplete is not provided in Chat yet, so type the command in full.
 Hermes Chat Stop shows **Stopping…** and consumes one interrupt per observed turn across this bridge's tabs and devices. Repeated clicks and the composer's Escape shortcut do not send another interrupt. Only an observed ready state confirms completion; after 10 seconds without confirmation, Chat says **Stop not confirmed. Check Terminal.** It never automatically retries or escalates to force-exit. A later observed turn gets its own Stop action after the native interrupt cooldown. Other agents' Stop behavior and direct Terminal keys are unchanged.
 The [manual test guide](hermes-safe-interaction-testing.md) walks through both Hermes interfaces on a separate local test session.
+
+GJC chat requires GJC 0.18.9 or later for its broker-bound SDK session CLI, with `gjc`
+on the server PC's PATH and its SDK broker already running. An older GJC opens in Terminal.
+Git must also be on PATH for the SDK's workspace-scope discovery.
+The bridge asks the broker which saved session belongs to the pane's GJC process;
+it does not start a broker or guess from the screen, session title or newest file.
+Missing, ambiguous or unreadable SDK identity uses Terminal instead. Terminal input,
+status tracking and prompt handling are unchanged.
 
 Devin sessions are never selected by directory or recency alone. A plain `devin` shows the
 terminal text, since herdr does not report its session without its Devin integration; a session
@@ -439,7 +447,7 @@ If `devices.json` under `HERDR_WEB_STATE_DIR` (default `~/.config/herdr-web-ui`)
 
 Nothing is typed without you:
 - Input typed while disconnected waits as a draft for you to send or discard.
-- On a current bridge, a message sent while the agent works goes to its next turn on its own, but only while the connection that sent it stays open and still holds the pane: losing either cancels it, even if the connection rejoins later. A reload or reconnect never resumes that: the saved copy of such a message comes back marked not confirmed, to copy or discard after checking the terminal. Other held messages stay with their PC and pane until you choose **Send now** or **Discard**. If the browser cannot save the queue, it says so: keep the tab open or copy the messages before reloading.
+- On a current bridge, a message sent while the agent works goes to its next turn on its own, but only while the connection that sent it stays open and still holds the pane. Switching tabs or workspaces on the same PC keeps that pane attached until its automatic queue settles. Losing the connection or lease cancels delivery, even if the connection rejoins later. A reload or reconnect never resumes that: the saved copy of such a message comes back marked not confirmed, to copy or discard after checking the terminal. Other held messages stay with their PC and pane until you choose **Send now** or **Discard**. If the browser cannot save the queue, it says so: keep the tab open or copy the messages before reloading.
 - A typed answer that picks an option of an approval, plan or menu waits for **Confirm**.
 
 Attaches and reconnects wait when another client holds the terminal. **Open here** on the waiting

@@ -191,7 +191,6 @@ describe("herdr socket", () => {
   const HERDR_RPC_ALLOWED: Record<string, string> = {
     "server/conversation.ts": "open PRs #869 #912 #923 change it",
     "server/gjc-runtime.ts": "open PR #912 changes it",
-    "server/hermes.ts": "open PR #910 changes it",
     "server/omo.ts": "open PR #923 changes it",
     "server/shell-agent.ts": "open PRs #885 #923 change it",
   };

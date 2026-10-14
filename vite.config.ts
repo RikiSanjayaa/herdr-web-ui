@@ -31,7 +31,9 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:7317",
+      // not the string shorthand: Vite gives that changeOrigin, and the server's same-origin check
+      // compares the browser's Origin (:5173) with the Host it was sent, which must stay :5173
+      "/api": { target: "http://localhost:7317", changeOrigin: false },
       "/ws": { target: "ws://localhost:7317", ws: true },
     },
   },

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
 import panes from "../site/demo/fixtures/panes.json";
 import { buildDemoApp } from "./demo-build.ts";
+import { chromePath } from "./chrome-path.ts";
 
 // A render error never blanks the app. The lane's demo build has its test hooks on, so
 // `?crash=<region>` makes that region throw while it renders (src/lib/crashProbe.ts):
@@ -71,7 +72,7 @@ try {
   } });
   port = server.port ?? 0;
   try {
-    const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+    const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
     try {
       const pane = `?pane=${encodeURIComponent(panes.infra)}&view=terminal`;
 

@@ -143,7 +143,10 @@ export class HerdrSocket {
   private idleTimer: number | null = null;
   private nextPing = 1;
   /** a page shown again or a network back: a reconnect waiting out its backoff runs now */
-  private readonly onWake = (): void => {
+  private readonly onWake = (event?: Event): void => {
+    if (event?.type === "pageshow") this.left = false;
+    // a page on its way into the back/forward cache connects again only when it is shown
+    if (this.left) return;
     if (typeof document !== "undefined" && document.visibilityState === "hidden") {
       this.pageHidden = true;
       // a deadline must not run out while the page is frozen, and a probe cut short is not an
@@ -157,6 +160,29 @@ export class HerdrSocket {
     }
     this.wake();
   };
+  /**
+   * A page navigated away from can be kept whole in the browser's back/forward cache, its socket
+   * still open: the server would go on delivering this connection's queued messages into a page
+   * nobody sees, while the page that replaced it shows them as not confirmed. Leaving ends the
+   * connection for real, so the disconnect handlers run and the server drops its pending input.
+   * No retry is armed and nothing connects until the page comes back (pageshow), not an `online`
+   * event nor a pane's attach in the moment before the page freezes. The page counts as put away,
+   * so an output stop (4008) that arrives late is attached again once it is back in use.
+   */
+  private readonly onLeave = (): void => {
+    if (this.disposed) return;
+    this.left = true;
+    this.pageHidden = true;
+    if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const socket = this.socket;
+    if (!socket) return;
+    this.endConnection();
+    // its close event must not schedule a reconnect behind the page; a late 4008 still stops output
+    this.endedEarly.add(socket);
+    socket.close();
+    this.connectionState = "waiting";
+  };
   private mode: ClientRole = "interact";
   /** whether the page is in use (`presence`), as last told; null until the page says */
   private presence: boolean | null = null;
@@ -165,6 +191,8 @@ export class HerdrSocket {
   private stoppedHidden = false;
   /** the page went hidden and has not been shown since */
   private pageHidden = false;
+  /** between pagehide and the pageshow that brings the page back */
+  private left = false;
   /** when the page was last shown after being hidden (Date.now()); 0 once an attach after a stop used it */
   private shownAt = 0;
   /** what the connected server listed in its snapshot: empty until it arrives, and on older bridges */
@@ -205,7 +233,7 @@ export class HerdrSocket {
   }
 
   connect(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.left) return;
     this.listenForWake();
     if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
       return;
@@ -511,6 +539,7 @@ export class HerdrSocket {
     this.wakeListening = true;
     window.addEventListener("online", this.onWake);
     window.addEventListener("pageshow", this.onWake);
+    window.addEventListener("pagehide", this.onLeave);
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", this.onWake);
       // a page loaded behind another app counts as put away until it is first shown
@@ -860,6 +889,7 @@ export class HerdrSocket {
     if (this.wakeListening) {
       window.removeEventListener("online", this.onWake);
       window.removeEventListener("pageshow", this.onWake);
+      window.removeEventListener("pagehide", this.onLeave);
       if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onWake);
       this.wakeListening = false;
     }

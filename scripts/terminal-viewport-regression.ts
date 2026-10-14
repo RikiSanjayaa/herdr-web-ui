@@ -10,9 +10,10 @@ import type { PaneFindResponse } from "../shared/protocol.ts";
 import { createServer } from "../server/index.ts";
 import { UsageService } from "../server/usage.ts";
 import { herdrRpc, paneScrollInfo, workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
+import { chromePath } from "./chrome-path.ts";
 const state = mkdtempSync(join(tmpdir(), "herdr-viewport-browser-"));
 const server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: state, usage: new UsageService(undefined, []) });
-const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
 let workspace: string | undefined;
 async function until(check: () => Promise<boolean>, message: string): Promise<void> {
   const deadline = Date.now() + 10000;

@@ -292,6 +292,9 @@ export const JA: Record<string, string> = {
   "Delete": "削除",
   "Delete anyway": "それでも削除",
   "{n} panes and {m} worktree workspaces close with it; the agents in them stop, and the checkouts stay.": "ペイン {n} 個とワークツリーのワークスペース {m} 個も一緒に閉じ、中のエージェントは停止します。チェックアウトは残ります。",
+  "{n} pane and {m} worktree workspaces close with it; the agents in them stop, and the checkouts stay.": "ペイン {n} 個とワークツリーのワークスペース {m} 個も一緒に閉じ、中のエージェントは停止します。チェックアウトは残ります。",
+  "{n} panes and {m} worktree workspace close with it; the agents in them stop, and the checkout stays.": "ペイン {n} 個とワークツリーのワークスペース {m} 個も一緒に閉じ、中のエージェントは停止します。チェックアウトは残ります。",
+  "{n} pane and {m} worktree workspace close with it; the agents in them stop, and the checkout stays.": "ペイン {n} 個とワークツリーのワークスペース {m} 個も一緒に閉じ、中のエージェントは停止します。チェックアウトは残ります。",
   "Enlarge diagram": "図を拡大",
   "Diagram": "図",
   "Zoom in": "拡大",
@@ -300,6 +303,7 @@ export const JA: Record<string, string> = {
   "Close": "閉じる",
   "Close workspace {name}?": "ワークスペース {name} を閉じますか？",
   "{n} panes close with it, and the agents in them stop.": "ペイン {n} 個も一緒に閉じ、中のエージェントは停止します。",
+  "{n} pane closes with it, and the agent in it stops.": "ペイン {n} 個も一緒に閉じ、中のエージェントは停止します。",
   "Rename failed: {reason}": "名前を変更できませんでした: {reason}",
   "Reorder failed: {reason}": "並べ替えできませんでした: {reason}",
 
