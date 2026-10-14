@@ -8,6 +8,7 @@ import type { BrowserEvidenceSession } from "./browser-evidence.ts";
 import { appFaces } from "./app-faces.ts";
 import panes from "../site/demo/fixtures/panes.json";
 import { buildDemoApp } from "./demo-build.ts";
+import { chromePath } from "./chrome-path.ts";
 
 // The prompt card's place, on the unmodified app over the demo's fixture transport: the demo's
 // "web" pane has an approval open. A second, tall form (steps, reference text, descriptions, a
@@ -218,7 +219,7 @@ try {
   const url = `http://127.0.0.1:${server.port}/herdr-web-ui/demo/app/?pane=${encodeURIComponent(panes.web)}`;
   if (shots !== null) mkdirSync(shots, { recursive: true });
   try {
-    const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+    const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
     try {
       interface Opened { page: Page; errors: string[]; shot: (name: string) => Promise<void>; close: () => Promise<void> }
       const evidenceByPage = new WeakMap<Page, BrowserEvidenceSession>();

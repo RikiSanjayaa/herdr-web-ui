@@ -8,20 +8,6 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
 ## [Unreleased]
 
 ### Added
-- Hermes Chat command suggestions for `/retry` and eligible individual skills, scoped to the
-  selected native process and profile. Project skills require native trust and current scan proof.
-  Ink transcripts can resolve a unique process-owned native runtime session.
-  Recognized single-skill transcript messages show the user request and a skill chip rather
-  than the expanded instructions; native storage and model input stay unchanged.
-  Resolved panes also offer `/help`, `/status`, `/reload-skills` and `/version` as terminal-backed cards:
-  visible output with a key-free dismiss action, and explicit navigation and close for Ink's
-  informational pagers. A visible native reload completion refreshes that pane's Chat suggestions.
-  Native transcript scrollbars and inline footers do not hide otherwise complete informational cards.
-  `/profile` shows its native result with the same controls. `/plan`, `/init` and `/review` use
-  native execution and transcript persistence, unlike the transient informational cards.
-  Recognized approval cards preserve warnings and explicit consent for protected instruction files;
-  unknown menus still require Terminal. `/diff` and `/context` remain outside this Chat command scope.
-  ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)
 - **Settings → Phone & devices → Portal** gives this PC a public HTTPS address through
   [Portal](https://github.com/gosuda/portal-tunnel), with no account and no domain of your own.
   With Portal v2.6.1 or later installed, **Start** runs it on a relay you enter, dropping any
@@ -91,15 +77,6 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   ([#860](https://github.com/devswha/herdr-web-ui/pull/860))
 
 ### Fixed
-- Hermes `/profile` result cards handle native redraws that place the command echo inside or
-  after the result. Ambiguous earlier results still remain in Terminal.
-  ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)
-- Markdown avoids building delimiter scanners for plain text inside emphasis and links,
-  reducing repeated allocations in large responses without changing the parsed content.
-  ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)
-- A displaced terminal attachment holds herdr's takeover diagnostic for the existing refusal
-  deadline, so a delayed process exit can confirm and discard it before it reaches the pane.
-  ([#910](https://github.com/devswha/herdr-web-ui/pull/910) by @RikiSanjayaa)
 - First-device pairing waits for the browser to return its device cookie before restricting
   access. A proxy that drops the cookie no longer locks out an otherwise open installation;
   Settings reports the failed pairing instead. Already restricted installations stay restricted.

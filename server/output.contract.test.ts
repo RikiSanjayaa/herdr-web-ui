@@ -121,6 +121,36 @@ describe("real terminal output flow control", () => {
     } finally { operator.ws.close(); observer.ws.close(); }
   }, 35_000);
 
+  it("gives a late joiner time to acknowledge its replay without pausing the operator", async () => {
+    const paneId = await pane();
+    const operator = await connect(paneId);
+    let joiner: Awaited<ReturnType<typeof connect>> | undefined;
+    try {
+      await flood(paneId);
+      // the replay tail is full: the joiner's first frame is ~128 KiB
+      await until(() => operator.state.bytes >= 160 * 1024, "operator fills the replay tail", 15_000);
+      // a phone on a slow link: it does not acknowledge its replay for longer than the stall deadline
+      joiner = await connect(paneId, false);
+      const joined = Date.now();
+      expect(joiner.state.bytes).toBeGreaterThan(64 * 1024);
+      await Bun.sleep(1000); // fixed wait: the joiner must stay silent past the time its window blocks
+      const before = operator.state.bytes;
+      await Bun.sleep(OUTPUT_STALL_MS); // fixed wait: proving nothing stalls or closes for a full stall deadline
+      // the joiner held only its own window up: the shared pty kept streaming to the operator
+      expect(operator.state.bytes - before).toBeGreaterThan(64 * 1024);
+      expect(Date.now() - joined).toBeGreaterThan(OUTPUT_STALL_MS);
+      expect(joiner.state.code).toBe(0);
+      // its ACK arrives inside its budget and it carries on as an ordinary client
+      joiner.state.ack = true;
+      joiner.acknowledge();
+      const caught = joiner.state.bytes;
+      await until(() => joiner!.state.bytes > caught + 4096, "joiner keeps receiving");
+      expect(joiner.state.code).toBe(0);
+      expect(operator.state.code).toBe(0);
+      operator.send({ type: "input", pane_id: paneId, text: "\x03" });
+    } finally { operator.ws.close(); joiner?.ws.close(); }
+  }, 30_000);
+
   it("resumes on valid ACKs and rejects future credit without accepting stale subscriptions", async () => {
     const paneId = await pane();
     const client = await connect(paneId, false);

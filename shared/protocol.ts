@@ -86,7 +86,8 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  *         404 from a server that sends no telemetry.
  *  GET    /api/agents                    -> { agents: AgentKind[] } (herdr's agent manifests: the
  *         kinds `agent.start` accepts, plus omo and gjc when they are on this server's PATH,
- *         for the new-session dialog)
+ *         each with `installed`: whether its command is on this server's PATH; for the
+ *         new-session dialog)
  *  GET    /api/integrations              -> IntegrationsResponse (herdr's `integration.list`, in
  *         herdr's order; read only: nothing here installs or removes one, Settings shows the
  *         `herdr integration install` command instead)
@@ -173,6 +174,20 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  *         keeps: its task list or checklist, read from the transcript; null when it keeps none)
  *  GET    /api/pane/files?pane_id=&q=&limit=  -> { files: string[] } (paths relative to the pane
  *         cwd matching q, for @-mentions; git ls-files when the cwd is a repo, bounded walk otherwise)
+ *  GET    /api/workspace/diff/files?pane_id=&directory=&scope=&base=&head= -> RepoDiffFileList
+ *         (what changed in the git repository the pane's folder, or `directory`, is inside: read
+ *         only, on the PC that owns the pane. `directory` is absolute, `~/…`, or relative to the
+ *         pane's folder; one of pane_id and directory is required. scope: workspace (the default:
+ *         working tree against the index, plus untracked files), staged (index against HEAD) or
+ *         commit (`base` against `head`, HEAD when absent; each one commit). The list is capped
+ *         (`limits`), and `truncated` says when it was. 400 invalid_scope / invalid_revision /
+ *         invalid_cwd / missing_directory, 404 revision_not_found, 409 not_a_repository,
+ *         503 git_unavailable, 504 git_timeout; 403 read_only for a watching device, as a file read)
+ *  GET    /api/workspace/diff/file?pane_id=&directory=&scope=&base=&head=&path=&old_path=
+ *         -> RepoDiffFilePatch (one file of that comparison as a standard `diff --git` unified
+ *         patch; `path` and, for a rename, `old_path` are the list's own, relative to the
+ *         repository root. The patch is whole or null: `unavailable` says why it is null, and no
+ *         cut hunk is ever sent. 400 invalid_path, 404 not_found when nothing changed there)
  *  GET    /api/pane/prompt?pane_id=     -> { prompt: InteractivePrompt | null, suggestion: string | null, restored: string | null }
  *         (the agent's TUI question/approval menu currently on screen, parsed from the visible pane
  *         text; with no menu, the next prompt Claude Code suggests, grey in its empty input box, and
@@ -199,7 +214,8 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  *         repository's open worktree workspaces with it; without it herdr refuses: workspace_group_close_required)
  *  POST   /api/worktree/create { workspace_id, branch, base?, label?, path?, agent?: { kind, name?, args? } } -> WorktreeOpened
  *         (worktree.create: a git worktree of that workspace's repo, checked out under herdr's
- *         worktree directory unless `path` says where, and opened as a new workspace grouped with it)
+ *         worktree directory unless `path` says where, and opened as a new workspace grouped with it;
+ *         409 repository_without_commits when no base is named and the repository has no commit yet)
  *  GET    /api/worktree/list?workspace_id= -> WorktreeListing (worktree.list: the repo's checkouts)
  *  POST   /api/worktree/open   { workspace_id, path | branch, label? } -> WorktreeOpened
  *         (worktree.open: an existing checkout as a workspace; already_open names the one it has)
@@ -680,9 +696,81 @@ export interface FileInfo {
   kind: FileKind;
 }
 
+/** Which two states of a repository are compared. */
+export type RepoDiffScope = "workspace" | "staged" | "commit";
+
+/** How one file changed. `untracked` exists only in the `workspace` scope. */
+export type RepoDiffStatus = "added" | "deleted" | "modified" | "renamed" | "copied" | "type_changed" | "unmerged" | "untracked";
+
+/** The repository a comparison was read from, on the PC that owns it. */
+export interface RepoDiffRepository {
+  /** the working tree's top folder, absolute */
+  root: string;
+  /** the checked-out branch; null on a detached HEAD */
+  branch: string | null;
+  /** HEAD's commit hash; null before the first commit */
+  head: string | null;
+  detached: boolean;
+  /** no commit yet: `staged` then lists everything added so far */
+  unborn: boolean;
+}
+
+export interface RepoDiffFile {
+  /** relative to the repository root, forward slashes, as git names it (never quoted) */
+  path: string;
+  /** where a renamed or copied file came from; null otherwise */
+  old_path: string | null;
+  status: RepoDiffStatus;
+  /** lines added and removed; null for a binary file, an untracked one, and past the list's byte cap */
+  additions: number | null;
+  deletions: number | null;
+  /** null when not determined: an untracked file in a list is not opened to find out */
+  binary: boolean | null;
+}
+
+/** GET /api/workspace/diff/files */
+export interface RepoDiffFileList {
+  repository: RepoDiffRepository;
+  scope: RepoDiffScope;
+  /** the commits compared, as full hashes, in the `commit` scope; null in the others */
+  base: string | null;
+  head: string | null;
+  /** sorted by path, at most `limits.max_files` */
+  files: RepoDiffFile[];
+  /** how many files changed in all; null when git printed more than `limits.max_list_bytes` */
+  total: number | null;
+  /** `files` is not the whole list */
+  truncated: boolean;
+  limits: { max_files: number; max_list_bytes: number };
+}
+
+/**
+ * GET /api/workspace/diff/file. `patch` is git's own output for that one file, from its
+ * `diff --git` line on, and is either complete or null.
+ */
+export interface RepoDiffFilePatch {
+  repository: RepoDiffRepository;
+  scope: RepoDiffScope;
+  base: string | null;
+  head: string | null;
+  file: RepoDiffFile;
+  patch: string | null;
+  /**
+   * Why there is no patch: `binary` (no text to show), `too_large` (past `limits.max_patch_bytes`),
+   * `unmerged` (a conflict: git prints a combined diff, which is not a unified patch) or
+   * `unsupported` (an untracked path that is not a regular file). Null when `patch` is set.
+   */
+  unavailable: "binary" | "too_large" | "unmerged" | "unsupported" | null;
+  /** the patch exists and was left out for its size */
+  truncated: boolean;
+  limits: { max_patch_bytes: number; context_lines: number };
+}
+
 export interface AgentKind {
   kind: string;
   label: string;
+  /** whether the server finds the agent's command (its kind) on its PATH; absent from an older bridge */
+  installed?: boolean;
 }
 
 /**
@@ -988,6 +1076,8 @@ export interface PushPayload {
   /** Absent in legacy payloads means local. */
   machine_id?: string;
   pane_id: string | null;
+  /** The workspace the pane was last seen in, so the tap of an ended pane opens that workspace. Absent when not known. */
+  workspace_id?: string;
   title: string;
   body: string;
   tag: string;
@@ -1078,10 +1168,15 @@ export type ClientMessage =
   | { type: "presence"; active: boolean }
   /** a read-only view of the pane at this grid, for a tab out of use (feature "watch"); never resizes the pane */
   | { type: "watch"; pane_id: string; cols: number; rows: number }
-  | { type: "unwatch"; pane_id: string };
+  | { type: "unwatch"; pane_id: string }
+  /** liveness only (feature "ping"): answered at once with a `pong` of the same id, for any role. The
+   * client sends it when the page comes back, the network changes or nothing arrived for a while,
+   * and drops a socket that stays silent: a half-open one still reads OPEN in the browser. A remote
+   * PC's socket relays it unchanged, so the remote server's snapshot decides whether it is sent. */
+  | { type: "ping"; id: number };
 
 /** What a server supports beyond the base protocol, listed in its first snapshot; older bridges list nothing. */
-export type ServerFeature = "submit" | "pending-input" | "pending-hold" | "secret-input" | "input-ready" | "take-over" | "watch" | "conversation-watch";
+export type ServerFeature = "submit" | "pending-input" | "pending-hold" | "secret-input" | "input-ready" | "take-over" | "watch" | "conversation-watch" | "ping";
 
 export type ServerMessage =
   | { type: "snapshot"; snapshot: SessionSnapshot; features?: ServerFeature[] }
@@ -1117,6 +1212,8 @@ export type ServerMessage =
   | { type: "watch-data"; pane_id: string; data: string }
   /** the watch ended (pane gone, herdr closed it, or this herdr has no read-only view); the client keeps its last screen */
   | { type: "watch-end"; pane_id: string }
+  /** the answer to a `ping`, with its id; only this frame, for a ping in flight, ends the client's liveness probe */
+  | { type: "pong"; id: number }
   /** `pane_id` names the pane an error is about, when it is about one (`attach_held`) */
   | { type: "error"; code: string; message: string; pane_id?: string };
 

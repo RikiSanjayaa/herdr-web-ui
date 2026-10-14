@@ -118,7 +118,10 @@ export function WorktreeDialog({ mode, workspace, onClose, onOpened }: Props) {
         return;
       }
       onOpened(result);
-    } catch (reason: unknown) { setError(said(reason)); setPending(null); }
+    } catch (reason: unknown) {
+      setError(reason instanceof ApiError && reason.code === "repository_without_commits" ? t("This repository has no commits yet. Make its first commit, then a worktree.") : said(reason));
+      setPending(null);
+    }
   };
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();

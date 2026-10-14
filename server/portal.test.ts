@@ -483,12 +483,14 @@ describe("running Portal", () => {
     const portalDir = join(stateDir, "portal");
     mkdirSync(portalDir, { recursive: true, mode: 0o700 });
     const identityPath = join(portalDir, "identity.json");
-    const unrelated = Bun.spawn(["sh", "-c", "while :; do sleep 0.1; done", "sh", "expose", "--identity-path", identityPath], {
+    const readyPath = join(stateDir, "unrelated-ready");
+    const unrelated = Bun.spawn(["sh", "-c", 'printf ready > "$1"; while :; do sleep 0.1; done', "sh", readyPath, "expose", "--identity-path", identityPath], {
       stdin: "ignore", stdout: "ignore", stderr: "ignore",
     });
     writeFileSync(join(portalDir, "state.json"), JSON.stringify({ enabled: true, relay: RELAY, port: 7317, pid: unrelated.pid }));
     const service = new PortalService({ stateDir, fetch: relay() });
     try {
+      await waitFor(() => existsSync(readyPath), "unrelated process executed its command");
       await service.resume({ port: 7317, tokenSet: false, serveOnly: false });
       expect(alive(unrelated.pid)).toBe(true);
     } finally {

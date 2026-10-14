@@ -7,7 +7,7 @@ import { open, stat } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPane } from "../shared/protocol.ts";
-import { herdrRpc } from "./herdr/client.ts";
+import { agentGet, paneProcessInfo } from "./herdr/client.ts";
 import { answerVersion, ConversationNotStarted, ConversationUnavailable, type ConversationPage, HistoryChanged, type RecognizedConversation, TRANSCRIPT_WINDOW_BYTES } from "./conversation.ts";
 import { toolSummary } from "./transcript-records.ts";
 import { TOOL_OUTPUT_CHARS, trimOutput } from "./tool-output.ts";
@@ -157,7 +157,7 @@ export async function processHermesHome(pid: number, argv: readonly string[] = [
 }
 
 /** Recognizes the Hermes executable, including Python launching its entrypoint. */
-export function isHermesProcess(entry: { name?: string; argv0?: string; argv?: readonly string[] }): boolean {
+export function isHermesProcess(entry: { name?: string; argv0?: string | null; argv?: readonly string[] | null }): boolean {
   const binary = (entry.name ?? entry.argv0 ?? entry.argv?.[0] ?? "").toLowerCase();
   if (binary === "hermes" || binary === "hermes.exe" || binary.endsWith("/hermes") || binary.endsWith("\\hermes.exe")) return true;
   if (entry.argv && entry.argv.length > 1) {
@@ -172,7 +172,7 @@ export function isHermesProcess(entry: { name?: string; argv0?: string; argv?: r
   return false;
 }
 
-interface HermesProcess { pid: number; name?: string; argv0?: string; argv?: string[]; cwd?: string }
+interface HermesProcess { pid: number; name?: string; argv0?: string | null; argv?: string[] | null; cwd?: string | null }
 
 function isTuiGateway(process: HermesProcess): boolean {
   const args = process.argv ?? [];
@@ -253,8 +253,8 @@ export function hermesRuntimeSession(home: string, processes: readonly HermesPro
 
 /** Resolve selected-process home, source dialect and environment without executing native code. */
 export async function paneHermesCommandContext(paneId: string, configuredHome?: string): Promise<HermesCommandContext | null> {
-  const info = await herdrRpc<{ process_info?: { foreground_processes?: HermesProcess[] } }>("pane.process_info", { pane_id: paneId }).catch(() => null);
-  const processes = info?.process_info?.foreground_processes ?? [];
+  const info = await paneProcessInfo(paneId).catch(() => null);
+  const processes = info?.foreground_processes ?? [];
   const launchers = processes.filter(isHermesProcess);
   const gateways = processes.filter(isTuiGateway);
   if (launchers.length !== 1 || gateways.length > 1) return null;
@@ -317,7 +317,7 @@ export async function paneHermesCommandContext(paneId: string, configuredHome?: 
     if (!features) continue;
     if (!sameProcessLifetime(native.pid, startedAt) || !sameProcessLifetime(launcher.pid, launcherStartedAt)) return null;
     const filesystem = process.platform === "linux" ? `/proc/${native.pid}/root` : "/";
-    return { ...features, home, userHome: env.HOME, env, cwd: native.cwd ?? launcher.cwd,
+    return { ...features, home, userHome: env.HOME, env, cwd: native.cwd ?? launcher.cwd ?? undefined,
       docker: existsSync(join(filesystem, ".dockerenv")) || existsSync(join(filesystem, "run", ".containerenv")),
       s6: existsSync(join(filesystem, "run", "s6")) || existsSync(join(filesystem, "package", "admin", "s6-overlay")) };
   }
@@ -377,22 +377,17 @@ export async function hermesTranscriptForPane(
     : null;
 
   if (sessionId === null) {
-    const info = await herdrRpc<{ agent: { agent_session?: { value?: unknown } } }>(
-      "agent.get",
-      { target: paneId },
-    ).catch(() => null);
-    if (typeof info?.agent?.agent_session?.value === "string" && info.agent.agent_session.value.length > 0) {
-      sessionId = info.agent.agent_session.value;
+    const info = await agentGet(paneId).catch(() => null);
+    if (typeof info?.agent_session?.value === "string" && info.agent_session.value.length > 0) {
+      sessionId = info.agent_session.value;
     }
   }
 
   let hermesProcess: HermesProcess | undefined;
   let processes: HermesProcess[] = [];
   if (configuredHome === undefined || sessionId === null) {
-    const processInfo = await herdrRpc<{
-      process_info?: { foreground_processes?: HermesProcess[] };
-    }>("pane.process_info", { pane_id: paneId }).catch(() => null);
-    processes = processInfo?.process_info?.foreground_processes ?? [];
+    const processInfo = await paneProcessInfo(paneId).catch(() => null);
+    processes = processInfo?.foreground_processes ?? [];
     hermesProcess = processes.find(isTuiGateway) ?? processes.find(isHermesProcess);
   }
 
