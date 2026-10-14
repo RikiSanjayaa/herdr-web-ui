@@ -9,11 +9,13 @@ import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
 import type { AppActions } from "../lib/actions.ts";
 import { knownStatus, rollupStatus, STATUS_WORD } from "../lib/status.ts";
 import { AgentMark } from "./AgentMark.tsx";
+import { WorkspaceFavicon } from "./WorkspaceFavicon.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { RowMenu, type RowMenuItem } from "./RowMenu.tsx";
 import { WorktreeDialog, type WorktreeDialogMode } from "./WorktreeDialog.tsx";
 import { focusWorkspaceListToggle } from "../lib/focus.ts";
-import { folderName, shortPathTitle, taskRowLines } from "../lib/paneName.ts";
+import { folderName, shortPathTitle, stripPaneChrome, taskRowLines } from "../lib/paneName.ts";
+import { ApiError } from "../lib/api.ts";
 import { useT } from "../lib/i18n.ts";
 import { rosterPanes } from "../lib/dagPane.ts";
 import { useSidebarActivity } from "../lib/sidebarActivity.tsx";
@@ -36,16 +38,6 @@ function storedWorktreeCollapsed(machineId: string, repoKeys: string[]): Set<str
   return collapsed;
 }
 
-/** shell prompt titles: `user@host:` is chrome, the path after it is the information */
-const SHELL_PREFIX = /^[^:@\s]+@[^:@\s]+:/;
-/** Herdr's agent glyph and spinner are already represented by the row mark and badge. */
-const AGENT_CHROME = /^π\s*[^\p{L}\p{N}\s]?\s*/u;
-
-function stripPaneChrome(title: string, agent: string | null | undefined): string {
-  const shellStripped = title.replace(SHELL_PREFIX, "");
-  return agent ? shellStripped.replace(AGENT_CHROME, "") : shellStripped;
-}
-
 export { paneTitle };
 
 /**
@@ -54,6 +46,14 @@ export { paneTitle };
  */
 export function displayPaneTitle(pane: PaneInfo): string {
   return pane.label?.trim() || shortPathTitle(stripPaneChrome(paneTitle(pane), pane.agent)) || pane.pane_id;
+}
+
+/**
+ * The title an alert names a pane by: as a row's, with the folder Codex adds after its thread
+ * kept. A notification is read away from the row that says where the pane is.
+ */
+export function alertPaneTitle(pane: PaneInfo): string {
+  return pane.label?.trim() || shortPathTitle(stripPaneChrome(paneTitle(pane), pane.agent, true)) || pane.pane_id;
 }
 
 /** herdr could not bring this pane back after a restart (0.9.3+ `restore_error`): a warning in the status cell, its reason on hover. */
@@ -176,8 +176,29 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions }: SidebarPr
   const machineId = useMachineId();
   // a DONE looked at here reads as ready with Quiet opened finishes on (lib/sidebarActivity.tsx)
   const activity = useSidebarActivity();
-  const { branches, rememberOpened } = useWorktreeBranches(snapshot, online);
-  const { closeWorkspace, moveWorkspace, removeWorktree, renameWorkspace } = useMachineApi();
+  const { branches, rememberOpened } = useWorktreeBranches(snapshot, online, true);
+  const { closeWorkspace, listWorktrees, moveWorkspace, removeWorktree, renameWorkspace } = useMachineApi();
+  // herdr marks only a workspace it opened as a worktree. One made on a repository's folder has no
+  // `worktree`, and it is where the first worktree starts: each is asked once whether git answers
+  // for it. A refusal (4xx) is an answer and is kept; a failure to ask is not, so that workspace
+  // keeps what was known of it and is asked again when the set changes or the PC comes back.
+  const unmarked = (snapshot?.workspaces ?? []).filter((workspace) => !workspace.worktree).map((workspace) => workspace.workspace_id).join("\n");
+  const [repositoryWorkspaces, setRepositoryWorkspaces] = useState<ReadonlySet<string>>(() => new Set());
+  const repositoryAnswers = useRef(new Map<string, boolean>());
+  useEffect(() => {
+    const known = repositoryAnswers.current;
+    if (!online || unmarked === "") { known.clear(); setRepositoryWorkspaces(new Set()); return; }
+    const ids = unmarked.split("\n");
+    for (const id of [...known.keys()]) if (!ids.includes(id)) known.delete(id);
+    let live = true;
+    const publish = () => { if (live) setRepositoryWorkspaces(new Set(ids.filter((id) => known.get(id) === true))); };
+    publish();
+    void Promise.all(ids.filter((id) => !known.has(id)).map((id) => listWorktrees(id).then(
+      () => { if (live) known.set(id, true); },
+      (error: unknown) => { if (live && error instanceof ApiError && error.status < 500) known.set(id, false); },
+    ))).then(publish);
+    return () => { live = false; };
+  }, [listWorktrees, unmarked, online]);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [worktreeDialog, setWorktreeDialog] = useState<{ mode: WorktreeDialogMode; workspace: WorkspaceInfo } | null>(null);
@@ -332,7 +353,7 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions }: SidebarPr
     // worktree workspaces close with it, which herdr refuses without close_group
     const linked = workspace.worktree?.is_linked_worktree === true;
     const worktrees = linked ? [] : (snapshot?.workspaces.filter((candidate) => candidate.worktree?.is_linked_worktree && candidate.worktree.repo_key === workspace.worktree?.repo_key) ?? []);
-    const worktreeItems: RowMenuItem[] = workspace.worktree && !linked ? [
+    const worktreeItems: RowMenuItem[] = (workspace.worktree || repositoryWorkspaces.has(workspace.workspace_id)) && !linked ? [
       { id: "new-worktree", label: t("New worktree"), icon: GitBranch, run: () => setWorktreeDialog({ mode: "create", workspace }) },
       { id: "open-worktree", label: t("Open worktree…"), icon: FolderOpen, run: () => setWorktreeDialog({ mode: "open", workspace }) },
     ] : [];
@@ -564,7 +585,7 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions }: SidebarPr
           aria-expanded={!collapsed}
           aria-controls={contentsId}
           onClick={() => setWorktreeCollapsed(repoKey, !collapsed)}
-        >{collapsed ? <Folder aria-hidden="true" /> : <FolderOpen aria-hidden="true" />}</button> : <span className="sidebar-mark workspace-folder" aria-hidden="true"><Folder /></span>}
+        >{collapsed ? <Folder aria-hidden="true" /> : <FolderOpen aria-hidden="true" />}</button> : <WorkspaceFavicon root={workspace.worktree?.checkout_path ?? pane.cwd ?? null} fallback={<span className="sidebar-mark workspace-folder" aria-hidden="true"><Folder /></span>} />}
         <div
           className="pane-select workspace-select"
           role="button"
@@ -667,6 +688,7 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions }: SidebarPr
         const repoKey = worktreeDialog.workspace.worktree?.repo_key;
         if (repoKey) setWorktreeCollapsed(repoKey, false);
         setWorktreeDialog(null);
+        if (opened.agent_started === true) actions.agentStarted(machineId, opened.pane_id);
         actions.selectPane(opened.pane_id);
       }} />}
     </div>

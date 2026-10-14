@@ -66,8 +66,13 @@ function MachineGroup({ machine, ...props }: Props & { machine: Machine }) {
     if (inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
-    try { await machineRequest(`/${machine.id}`, method, body); setError(null); if (method === "DELETE" && props.selectedMachineId === machine.id) props.onSelect("local", null); }
-    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    // The selected PC moves to this one before it is removed: the server tells every tab the
+    // roster without it before it answers, and a selection on a PC the roster has dropped reads
+    // as one removed elsewhere ("That link's PC is not set up here"). A failure puts it back.
+    const leaving = method === "DELETE" && props.selectedMachineId === machine.id ? { pane: props.selectedPaneId } : null;
+    if (leaving) props.onSelect("local", null);
+    try { await machineRequest(`/${machine.id}`, method, body); setError(null); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); if (leaving) props.onSelect(machine.id, leaving.pane); }
     finally { inFlight.current = false; setBusy(false); }
   };
   const actions: AppActions = { ...props.actions, selectPane: (id) => props.onSelect(machine.id, id), openNewSession: () => props.onNew(machine.id) };
@@ -107,7 +112,7 @@ function MachineGroup({ machine, ...props }: Props & { machine: Machine }) {
       {confirmDelete && <p className="field-hint">{t("Removes this registration. Remote sessions keep running.")}</p>}
     </div>}
     {error && <p className="machine-error" role="alert">{error}</p>}
-    {!collapsed && <div className={online ? "" : "machine-offline"} {...(!online ? { inert: "" } : {})}>
+    {!collapsed && <div className={online ? "" : "machine-offline"} inert={!online}>
       {!online && !machine.snapshot ? <p className="tree-state machine-empty" role="status">{t("No saved sessions")}</p> : <MachineContext.Provider value={machine.id}><Sidebar snapshot={machine.snapshot} online={online} selectedPaneId={props.selectedMachineId === machine.id ? props.selectedPaneId : null} actions={actions} /></MachineContext.Provider>}
     </div>}
   </section>;

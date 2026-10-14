@@ -158,6 +158,52 @@ try {
   }
   console.log("PASS tab and workspace navigation retain pending ownership, release the old lease and permit one explicit Send now");
 
+  // A held terminal draft blocks Send now on a server-owned row: the server pastes the text and
+  // sends Enter, so keys left in the draft (or a partial line in the pty) would run with it.
+  {
+    await report("working");
+    const pending = await queue("never beside a held draft");
+    const toggle = (title: string) => page.getByTitle(title, { exact: true }).click();
+    // keys typed while the terminal is not ready for input are held as a draft
+    routed!.send(JSON.stringify({ type: "input-ready", pane_id: pane, ready: false }));
+    await toggle("Live terminal (⌘⇧J)");
+    const waiting = current(pane).locator(".terminal-banner", { hasText: "Waiting for terminal input…" });
+    await waiting.waitFor();
+    await current(pane).locator(".xterm-helper-textarea").pressSequentially("abc");
+    await until(async () => await current(pane).locator(".draft-text").textContent() === "abc", "the typing is held as a draft");
+    // ready again: the draft still waits for Send or Discard
+    routed!.send(JSON.stringify({ type: "input-ready", pane_id: pane, ready: true }));
+    await waiting.waitFor({ state: "hidden" });
+    await toggle("Chat transcript (⌘⇧J)");
+    const row = rows().filter({ hasText: pending.text });
+    const actionAt = sent.length;
+    await row.getByRole("button", { name: /^Send now:/ }).click();
+    await row.locator(".pending-message-note", { hasText: "Not sent: send or discard the held input first." }).waitFor();
+    assert.equal(sent.slice(actionAt).some(({ frame }) => frame.type === "pending-action"), false, "Send now beside a held draft sends no pending action");
+    await noBytes(delivered, "Send now beside a held draft types nothing");
+    // the message box is refused beside a held draft too: its Enter would run the pty's partial line
+    const heldNote = "Not sent: send or discard the held input first.";
+    const submitAt = sent.length;
+    await composer().fill("ls");
+    await current(pane).getByRole("button", { name: "Send message", exact: true }).click();
+    await until(async () => await current(pane).getByText(heldNote, { exact: true }).count() >= 2, "the message box says the held draft comes first");
+    assert.equal(sent.slice(submitAt).some(({ frame }) => frame.type === "submit"), false, "a message box send beside a held draft sends no submit");
+    assert.equal(await composer().inputValue(), "ls", "a refused message keeps its text");
+    await composer().fill("");
+    await noBytes(delivered, "a message box send beside a held draft types nothing");
+    // the row is not marked unconfirmed: once the draft is discarded, Send now delivers it
+    await toggle("Live terminal (⌘⇧J)");
+    await current(pane).locator(".draft-discard").click();
+    await current(pane).locator(".terminal-banner-draft").waitFor({ state: "detached" });
+    await toggle("Chat transcript (⌘⇧J)");
+    await row.getByRole("button", { name: /^Send now:/ }).click();
+    delivered += paste(pending.text);
+    await until(() => bytes() === delivered, "Send now after the draft is discarded delivers the message once");
+    await row.waitFor({ state: "detached" });
+    await report("idle");
+  }
+  console.log("PASS a held terminal draft refuses Send now on a server-owned row until it is settled");
+
   // Visible split siblings keep their leases. They still share the same PC connection;
   // neither the other pane's input-ready nor its output can advance this agent's queue.
   const sibling = await paneSplit(pane, "right", false);

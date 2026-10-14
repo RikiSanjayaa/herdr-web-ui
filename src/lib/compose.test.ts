@@ -24,6 +24,9 @@ describe("composerMessage and submitNote", () => {
     expect(submitNotTyped("input_draft")).toBe(true);
     expect(submitNotTyped("hermes_input_draft")).toBe(true);
     expect(submitNote("hermes_input_draft", "x")).toBe("Not sent: Hermes' terminal input is not known to be empty. Send or clear it there, then send this message.");
+    // refused by the view while the terminal holds input, before anything reached the socket
+    expect(submitNotTyped("held_input")).toBe(true);
+    expect(submitNote("held_input", "x")).toBe("Not sent: send or discard the held input first.");
     expect(submitNote("pending_input_unsupported", "x")).toBe("Update this PC to send messages in the next turn. Your draft stayed here.");
     expect(submitNotTyped("submit_changed")).toBe(false);
     expect(submitNotTyped("pending_uncertain")).toBe(false);

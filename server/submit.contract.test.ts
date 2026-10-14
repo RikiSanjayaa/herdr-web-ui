@@ -449,17 +449,31 @@ describe("WebSocket submit", () => {
   it("cancels immediate Hermes submission cleanly when cancelled before paste", async () => {
     const fixture = await hermesRecorder("hermes-pre-cancel");
     const local = createServer({ port: 0, stateDir: join(root, "hermes-pre-cancel-state"), submitDelayMs: 250 });
-    const sender = await Socket.connect(local.port);
+    const sender = await Socket.connect(local.port); const keeper = await Socket.connect(local.port);
     const original = herdr.paneSendText;
+    let settled = false;
     const sendSpy = spyOn(herdr, "paneSendText").mockImplementation(async (paneId, value, socketPath, allowed) => {
-      if (paneId === fixture.pane) sender.close();
-      return original(paneId, value, socketPath, allowed);
+      if (paneId !== fixture.pane || value !== paste("never sent")) return original(paneId, value, socketPath, allowed);
+      sender.close();
+      try {
+        await original(paneId, value, socketPath, allowed);
+      } finally { settled = true; }
     });
     try {
       sender.send({ type: "submit", id: 1, pane_id: fixture.pane, text: "never sent", payload: "unused" });
-      await Bun.sleep(500);
+      const deadline = Date.now() + 5_000;
+      // The live WebSocket close and separate herdr process cannot use this test's fake clock.
+      while (!settled) {
+        if (Date.now() >= deadline) throw new Error("cancelled Hermes paste did not settle");
+        await Bun.sleep(25);
+      }
       expect(typed(fixture, 0)).toBe("");
-    } finally { sendSpy.mockRestore(); sender.close(); local.stop(); }
+      // Drain the pane's server queue and wait for the external recorder to read it.
+      keeper.send({ type: "submit", id: 2, pane_id: fixture.pane, text: "barrier", payload: "barrier", typed: true });
+      expect(await keeper.result(2)).toMatchObject({ ok: true });
+      await received(fixture, 0, 1);
+      expect(typed(fixture, 0)).toBe("barrier\r");
+    } finally { sendSpy.mockRestore(); sender.close(); keeper.close(); local.stop(); }
   }, 30_000);
 
 

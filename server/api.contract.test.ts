@@ -21,7 +21,7 @@ import { handleMachineRequest } from "./machine-api.ts";
 import type { MachineManager } from "./machines.ts";
 import { TailnetIdentitySource } from "./tailscale.ts";
 import { forgetTranscriptState } from "./conversation.ts";
-import type { HermesStopResponse } from "../shared/protocol.ts";
+import type { HermesStopResponse, RepoDiffFileList, RepoDiffFilePatch } from "../shared/protocol.ts";
 import { DeviceStore } from "./devices.ts";
 
 /**
@@ -237,6 +237,8 @@ describe("Hermes-only Stop API", () => {
       const paneId = created.root_pane.pane_id;
       const devices = new DeviceStore(state);
       const watcher = devices.pair(devices.startPairing().code, "Stop contract watch", "watch")!;
+      // First-pair cookies stay in memory until returned; confirm before the server loads its own store.
+      expect(devices.match(watcher.token)).toEqual(watcher.device);
       const other = await tabCreate({ workspaceId: created.workspace.workspace_id });
       app = createServer({ port: 0, stateDir: state, token: "hermes-stop-contract" });
       const at = `http://localhost:${app.port}`;
@@ -253,7 +255,7 @@ describe("Hermes-only Stop API", () => {
       });
       expect((await fetch(`${at}${path}?pane_id=${encodeURIComponent(paneId)}`)).status).toBe(401);
       expect((await fetch(`${at}${path}`, { method: "POST", body: JSON.stringify({ pane_id: paneId, turn_id: "old" }) })).status).toBe(401);
-      const watchHeaders = { cookie: `herdr_web_device=${watcher.token}`, origin: at, "content-type": "application/json" };
+      const watchHeaders = { cookie: `herdr_web_device=${watcher.token}`, origin: at, "content-type": "application/json", "x-herdr-machine": "1" };
       expect((await fetch(`${at}${path}?pane_id=${encodeURIComponent(paneId)}`, { headers: watchHeaders })).status).toBe(200);
       const watchedPost = await fetch(`${at}${path}`, { method: "POST", headers: watchHeaders, body: JSON.stringify({ pane_id: paneId, turn_id: "old" }) });
       expect(watchedPost.status).toBe(403);
@@ -1176,8 +1178,10 @@ describe("workspace and discovery endpoints", () => {
       expect((await kinds()).map((agent) => agent.kind)).not.toContain("gjc");
       for (const name of ["omo", "gjc"]) writeFileSync(join(bin, name), "#!/bin/sh\n", { mode: 0o755 });
       const offered = await kinds();
-      expect(offered).toContainEqual({ kind: "omo", label: "OmO" });
-      expect(offered).toContainEqual({ kind: "gjc", label: "Gajae Code" });
+      expect(offered).toContainEqual({ kind: "omo", label: "OmO", installed: true });
+      expect(offered).toContainEqual({ kind: "gjc", label: "Gajae Code", installed: true });
+      // claude is always listed, and said to be missing where its command is not on PATH
+      expect(offered).toContainEqual({ kind: "claude", label: "Claude Code", installed: false });
     } finally {
       process.env["PATH"] = path;
       rmSync(bin, { recursive: true, force: true });
@@ -1242,6 +1246,26 @@ describe("workspace and discovery endpoints", () => {
     expect(close.status).toBe(200);
     expect(await close.json()).toEqual({ ok: true });
     workspaceId = null;
+  }, 20_000);
+
+  it("says a repository has no commits yet instead of passing git's refusal on", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "herdr-web-ui-worktree-empty-"));
+    expect(Bun.spawnSync(["git", "init", "-q", "-b", "main"], { cwd: repo, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
+    const parent = await workspaceCreate({ cwd: repo, label: "herdr-web-ui-test-worktree-empty" });
+    const checkout = join(`${repo}-checkouts`, "feature");
+    try {
+      const create = await fetch(`${base()}/api/worktree/create`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspace_id: parent.workspace.workspace_id, branch: "herdr-web-ui-test-unborn", path: checkout }),
+      });
+      expect(create.status).toBe(409);
+      expect(((await create.json()) as ApiError).error.code).toBe("repository_without_commits");
+      expect(existsSync(checkout)).toBeFalse();
+    } finally {
+      await herdrRpc("workspace.close", { workspace_id: parent.workspace.workspace_id }).catch(() => undefined);
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(`${repo}-checkouts`, { recursive: true, force: true });
+    }
   }, 20_000);
 
   it("creates a worktree of an owned repository as a grouped workspace, lists it, and opens it again", async () => {
@@ -2891,6 +2915,9 @@ describe("token auth", () => {
       const { code } = (await (await fetch(`http://127.0.0.1:${open.port}/api/devices/pair/start`, { method: "POST", headers: guard })).json()) as { code: string };
       const paired = await fetch(`http://127.0.0.1:${open.port}/api/devices/pair`, { method: "POST", headers: { ...guard, "x-forwarded-for": "100.64.0.9" }, body: JSON.stringify({ code, label: "Phone" }) });
       expect(paired.status).toBe(204);
+      expect((await health(open.port)).lan_exposure).toEqual({ host: "0.0.0.0" });
+      const cookie = paired.headers.get("set-cookie")!.split(";")[0]!;
+      expect((await health(open.port, { cookie })).auth).toMatchObject({ authenticated: true, via: "device" });
       expect((await health(open.port)).auth).toMatchObject({ authenticated: true, via: "local" });
       expect((await health(open.port)).lan_exposure).toBeUndefined();
     } finally {
@@ -3118,4 +3145,59 @@ it("refuses cross-origin changes while allowing same-origin and CLI requests", a
       expect(response.status).toBe(200);
     }
   } finally { instance.stop(); await workspaceClose(created.workspace.workspace_id); rmSync(root, { recursive: true, force: true }); }
+});
+
+describe("repository diff of a pane's folder", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-web-ui-test-repo-diff-")));
+  let workspaceId: string | null = null;
+  afterAll(async () => {
+    if (workspaceId) await workspaceClose(workspaceId).catch(() => undefined);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("reads the repository the pane sits in, a folder named from it, and a named folder once the pane is gone", async () => {
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "-C", root, ...args], { stdout: "ignore", stderr: "pipe" });
+      if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
+    };
+    git("init", "-q", "-b", "main");
+    mkdirSync(join(root, "sub"));
+    writeFileSync(join(root, "a.txt"), "one\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "first");
+    writeFileSync(join(root, "a.txt"), "two\n");
+    // the pane sits below the repository's top, and in no repository of its own
+    const created = await workspaceCreate({ cwd: join(root, "sub"), label: "herdr-web-ui-test-repo-diff" });
+    workspaceId = created.workspace.workspace_id;
+    const pane = `pane_id=${encodeURIComponent(created.root_pane.pane_id)}`;
+    const expected: RepoDiffFileList["files"] = [{ path: "a.txt", old_path: null, status: "modified", additions: 1, deletions: 1, binary: false }];
+    for (const url of [
+      `${base()}/api/workspace/diff/files?${pane}`,
+      `${base()}/api/machines/local/workspace/diff/files?${pane}`,
+      `${base()}/api/workspace/diff/files?${pane}&directory=..`,
+      `${base()}/api/workspace/diff/files?pane_id=no-such-pane&directory=${encodeURIComponent(root)}`,
+    ]) {
+      const response = await fetch(url);
+      expect([url, response.status]).toEqual([url, 200]);
+      const list = (await response.json()) as RepoDiffFileList;
+      expect(list.repository).toMatchObject({ root, branch: "main", detached: false, unborn: false });
+      expect(list.files).toEqual(expected);
+    }
+    const file = await fetch(`${base()}/api/workspace/diff/file?${pane}&path=a.txt`);
+    expect(file.status).toBe(200);
+    const answer = (await file.json()) as RepoDiffFilePatch;
+    expect(answer).toMatchObject({ file: expected[0], unavailable: null, truncated: false });
+    expect(answer.patch).toStartWith("diff --git a/a.txt b/a.txt\n");
+    expect(answer.patch).toEndWith("-one\n+two\n");
+
+    const gone = await fetch(`${base()}/api/workspace/diff/files?pane_id=no-such-pane`);
+    expect(gone.status).toBe(404);
+    expect(typeof ((await gone.json()) as ApiError).error.code).toBe("string");
+    const relative = await fetch(`${base()}/api/workspace/diff/files?pane_id=no-such-pane&directory=sub`);
+    expect(relative.status).toBe(400);
+    expect(((await relative.json()) as ApiError).error.code).toBe("invalid_cwd");
+    const posted = await fetch(`${base()}/api/workspace/diff/files?${pane}`, { method: "POST", headers: { "x-herdr-machine": "1" } });
+    expect(posted.status).toBe(400);
+    expect(((await posted.json()) as ApiError).error.code).toBe("method_not_allowed");
+  });
 });

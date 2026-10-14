@@ -38,7 +38,7 @@ import { closeSync, openSync, readFileSync, readSync, realpathSync, statSync } f
 import nodePath, { type PlatformPath } from "node:path";
 
 import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPane, SessionSnapshot } from "../shared/protocol.ts";
-import { herdrRpc, sessionSnapshot } from "./herdr/client.ts";
+import { herdrRpc, paneRead, sessionSnapshot } from "./herdr/client.ts";
 import { codexHistorySegments, createCodexTranscriptParser, codexOutputText, codexTranscriptPath, defaultCodexHome, forgetAllCodexState, forgetCodexStateFor, paneCodexHome, parseCodexTranscript, readRange } from "./codex.ts";
 import { CODEX_IMAGE_REF, codexTranscriptImage } from "./codex-images.ts";
 import { AmbiguousClaudeStore, claudeProcessSession, claudeTranscriptFile, defaultClaudeConfigDir, forgetClaudeSessionFile, forgetClaudeSessions, isClaudeProcess, processClaudeConfigDir } from "./claude-store.ts";
@@ -61,6 +61,8 @@ import { forgetHermesTranscriptState, hermesConversationPage, hermesToolOutput, 
 import { invokedSkill } from "./skill-activity.ts";
 import { agentTaskResult, claudePeerId, claudePeerNotice, isContextClear, MAX_TURNS, parseOmpTranscript, piImageBlock, piMessage, piResults, toolSummary } from "./transcript-records.ts";
 import { forgetSubagents, lineNotifications, subagentDetails, taskNotification, type SubagentDetail } from "./claude-subagents.ts";
+import { launchedAgents } from "./launched-agents.ts";
+import { readsStartScreen, startScreenMetadata } from "./start-screen.ts";
 
 export { isOmoProcess } from "./omo.ts";
 
@@ -1002,6 +1004,7 @@ function liveTurns(path: string, stream: TranscriptStream, source: RecognizedCon
 
 /** Forget every scan and parse kept between polls (tests compare against a cold read). */
 export function forgetTranscriptState(): void {
+  launchedAgents.clear();
   cache.clear();
   writtenSessions.clear();
   forgetClaudeSessions();
@@ -1032,6 +1035,7 @@ export function forgetTranscriptState(): void {
 export function forgetPaneTranscriptState(paneId: string): void {
   const reads = paneReads.get(paneId);
   paneReads.delete(paneId);
+  launchedAgents.forget(paneId);
   forgetGjcPane(paneId);
   if (reads === undefined) return;
   // two panes can read one transcript (a resumed session, a shared store): what another pane
@@ -1401,7 +1405,15 @@ export async function paneConversation(paneId: string, codexHome?: string, page:
   const snapshot = await sessionSnapshot();
   let resolved: NativeTranscript;
 
-  const onNotStarted = (error: ConversationNotStarted): RecognizedConversation => {
+  // no transcript states the model yet: the agent's own screen does (start-screen.ts). A screen
+  // that cannot be read leaves it unknown, as it was
+  const notBegun = async (source: RecognizedConversation["source"], id: string): Promise<RecognizedConversation> => {
+    const screen = readsStartScreen(source) ? await paneRead({ paneId, source: "visible", format: "text", timeoutMs: 2_000 }).then((read) => read.text, () => "") : "";
+    const metadata = startScreenMetadata(source, screen);
+    return { source, turns: [], metadata, cursor: null, history_id: id, version: answerVersion(id, `${metadata.model}\0${metadata.reasoning_effort}`) };
+  };
+
+  const onNotStarted = (error: ConversationNotStarted): Promise<RecognizedConversation> => {
     // a file read before and gone since is no conversation not begun: the terminal stands in for it
     if (writtenSessions.has(`${error.source}\0${error.identity}`)) throw new ConversationUnavailable("transcript_missing");
     // nothing comes before a conversation not begun: a cursor into it is another one's
@@ -1411,15 +1423,22 @@ export async function paneConversation(paneId: string, codexHome?: string, page:
     if (status === "working" || status === "blocked") throw error;
     // the chat says there is nothing yet; the session's first prompt writes the file and
     // the next refresh's history_id differs, so the chat takes it whole
-    const id = `unwritten:${error.sessionId}`;
-    return { source: error.source, turns: [], metadata: { model: null, reasoning_effort: null }, cursor: null, history_id: id, version: answerVersion(id, "") };
+    return notBegun(error.source, `unwritten:${error.sessionId}`);
   };
 
   try {
     resolved = await paneTranscript(paneId, codexHome, snapshot, devinDbPath, opencodeDb, hermesHome, grokHome);
+    launchedAgents.forget(paneId);
   } catch (error) {
-    if (error instanceof ConversationNotStarted) return onNotStarted(error);
-    throw error;
+    if (error instanceof ConversationNotStarted) { launchedAgents.forget(paneId); return await onNotStarted(error); }
+    if (!(error instanceof ConversationUnavailable)) throw error;
+    const pane = snapshot.panes.find((candidate) => candidate.pane_id === paneId);
+    if (pane === undefined) { launchedAgents.forget(paneId); throw error; }
+    // an agent this server started writes no session before its first message (launched-agents.ts)
+    const launch = launchedAgents.notBegun(paneId, pane.agent_status);
+    if (launch === null) throw error;
+    if (page.before !== undefined || page.since !== undefined || page.from !== undefined) throw new HistoryChanged();
+    return await notBegun(launch.source, launch.historyId);
   }
   if (resolved.source === "devin-transcript") {
     try {
@@ -1449,7 +1468,7 @@ export async function paneConversation(paneId: string, codexHome?: string, page:
       rememberPaneSession(paneId, `${resolved.source}\0${resolved.sessionId}`);
       return answer;
     } catch (error) {
-      if (error instanceof ConversationNotStarted) return onNotStarted(error);
+      if (error instanceof ConversationNotStarted) return await onNotStarted(error);
       throw error;
     }
   }

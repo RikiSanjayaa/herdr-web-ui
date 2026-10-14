@@ -116,8 +116,8 @@ export async function processHermesHome(pid: number, argv: readonly string[] = [
   return home;
 }
 
-/** Recognizes the Hermes executable, including Python launching its entrypoint. */
-export function isHermesProcess(entry: { name?: string; argv0?: string; argv?: readonly string[] }): boolean {
+/** Recognizes the Hermes executable from nullable process metadata, including Python launching its entrypoint. */
+export function isHermesProcess(entry: { name?: string; argv0?: string | null; argv?: readonly string[] | null }): boolean {
   const binary = (entry.name ?? entry.argv0 ?? entry.argv?.[0] ?? "").toLowerCase();
   if (binary === "hermes" || binary === "hermes.exe" || binary.endsWith("/hermes") || binary.endsWith("\\hermes.exe")) return true;
   if (entry.argv && entry.argv.length > 1) {

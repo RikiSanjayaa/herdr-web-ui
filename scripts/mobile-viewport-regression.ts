@@ -36,6 +36,8 @@ export async function checkMobileViewport(browser: Browser, origin: string, pane
     await composer.waitFor();
     assert.equal(await page.locator(".chat-view").evaluate((node) => getComputedStyle(node).overscrollBehaviorY), "contain",
       "a drag past the transcript's top stays in the transcript, or Android Chrome reloads the app");
+    assert.deepEqual(await page.evaluate(() => [document.documentElement, document.body].map((node) => getComputedStyle(node).overscrollBehaviorY)),
+      ["contain", "contain"], "a drag on a surface with nothing to scroll reaches the page, which Android Chrome before 144 reloads unless html and body contain it");
     const blur = () => page.evaluate(() => { (document.activeElement as HTMLElement)?.blur(); });
     const height = (value: number) => page.evaluate((value) => (window as ViewportQA).viewportQA.resize(value), value);
     const shell = async (keyboard: boolean, appHeight: string, pixels: number) => {

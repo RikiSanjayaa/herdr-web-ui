@@ -128,9 +128,14 @@ async function setup(label: string, agent = "claude", screen = "› Message\n", 
     const before = await drawn();
     writeFileSync(screenFile, encoded ? text.replace(/\r?\n/g, "\r\n") : text);
     const deadline = Date.now() + 5_000;
-    while (await drawn() === before || !(encoded
-      ? (await paneRead({ paneId: pane, source: "visible", format: "text" })).text.replace(/\s/g, "").endsWith(ending.replace(/\s/g, ""))
-      : (await paneRead({ paneId: pane, source: "visible", format: "text" })).text.trimEnd().endsWith(ending.trimEnd()))) {
+    // herdr renders in a separate process, outside this test's fake timers.
+    while (true) {
+      const screenChanged = await drawn() !== before;
+      const visibleText = (await paneRead({ paneId: pane, source: "visible", format: "text" })).text;
+      const endingDrawn = encoded
+        ? visibleText.replace(/\s/g, "").endsWith(ending.replace(/\s/g, ""))
+        : visibleText.trimEnd().endsWith(ending.trimEnd());
+      if (screenChanged && endingDrawn) return;
       if (Date.now() >= deadline) throw new Error("recorder screen did not update");
       await Bun.sleep(25);
     }
@@ -697,7 +702,8 @@ describe("connection-owned pending input", () => {
     const first = await f.queue(1, "first"); const second = await f.queue(2, "held second");
     await f.state("idle"); await f.removed(first.id);
     await f.socket.wait((frame) => frame.type === "pending-messages" && frame.messages.some((item: PendingMessage) => item.id === second.id && item.state === "held" && item.error?.code === "pending_turn_unconfirmed"));
-    expect(f.bytes()).toBe(`${paste("first")}\r`);
+    // the bridge's Enter has gone to herdr, but the recorder in the pane may not have logged it yet
+    await f.waitBytes("\r"); expect(f.bytes()).toBe(`${paste("first")}\r`);
   }, 30_000);
 
   it("rejects ordinary queue input and Send now at a visible password prompt despite a working state", async () => {
